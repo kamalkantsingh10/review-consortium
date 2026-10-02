@@ -103,6 +103,11 @@ def _read_board(study: Path, test: str) -> tuple[str, list[dict], dict]:
     if found is None:
         raise ConsortiumError("unknown_test", test)
     kind, trials, rates = found
+    if kind == "screening":
+        raise ConsortiumError(
+            "screening_not_exportable",
+            f"{test} is a screening Test or run; screening Trials never appear in an Export",
+        )
     if not trials:
         raise ConsortiumError("nothing_to_export", test)
     running = sum(t["state"] in RUNNING_STATES for t in trials)
@@ -404,7 +409,8 @@ def export_test(study_dir: Path | str, test: str) -> Path:
     neither; both are written together (see ``_write``).
 
     Raises, in this order and before writing anything: ``unknown_test`` (not
-    registered, or no ``board.db``), ``nothing_to_export`` (no Trials),
+    registered, or no ``board.db``), ``screening_not_exportable`` (a ``screening`` Test or
+    screening run, story 3.1), ``nothing_to_export`` (no Trials),
     ``sessions_running`` (a Trial is planned or sent), ``board_unreadable``
     (``board.db`` unreadable, or an attempt row missing), ``panel_missing`` /
     ``panel_invalid`` / ``panel_mismatch``, ``unknown_instrument``; then

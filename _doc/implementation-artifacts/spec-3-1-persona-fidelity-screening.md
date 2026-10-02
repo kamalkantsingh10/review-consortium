@@ -2,7 +2,8 @@
 title: 'Story 3.1 — Persona-fidelity screening'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '9092207899e54bdc0821a36e7fc2f021bf3dc566'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -84,28 +85,28 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/engine/run.py`, `stages/open.py` -- Move the machinery and parametrise it by `Prepared`. `open.py` becomes a thin stage and re-exports its existing names. Layering: `engine/run.py` imports core, board, archive, raters, `engine.dispatch` and `config.models` types only. Every `config.load` call (study, prices, Test file, Instruments, Personas, cards, card wording) reaches it through a `ConfigReader` (a frozen dataclass of those callables) that the stage builds from `config.load` and passes in; `raters_for` takes the Fake cue map as an argument. `Prepared` also carries `resume_check(conn)` (no-op by default; called under the lease before a resume dispatches), which 3.3 uses.
-- [ ] `pyproject.toml` -- Add a forbidden contract: `consortium.engine` must not import `consortium.config.load` or `yaml`.
-- [ ] `src/consortium/config/models.py` -- Add these fields:
+- [x] `src/consortium/engine/run.py`, `stages/open.py` -- Move the machinery and parametrise it by `Prepared`. `open.py` becomes a thin stage and re-exports its existing names. Layering: `engine/run.py` imports core, board, archive, raters, `engine.dispatch` and `config.models` types only. Every `config.load` call (study, prices, Test file, Instruments, Personas, cards, card wording) reaches it through a `ConfigReader` (a frozen dataclass of those callables) that the stage builds from `config.load` and passes in; `raters_for` takes the Fake cue map as an argument. `Prepared` also carries `resume_check(conn)` (no-op by default; called under the lease before a resume dispatches), which 3.3 uses.
+- [x] `pyproject.toml` -- Add a forbidden contract: `consortium.engine` must not import `consortium.config.load` or `yaml`.
+- [x] `src/consortium/config/models.py` -- Add these fields:
   - `InstrumentDef.self_report: bool = False`, `InstrumentDef.citation: str | None = None`.
   - `InstrumentDef.keys: dict[item_id, ItemKey(construct, reversed, subscale: s1|s2|s3 | None)] | None`. Each key must name a Likert Item of the Instrument. A `self_report` Instrument must have a key for every Item, and each construct must be one of `TRAITS ∪ {nars}`; `subscale` is required for `nars` keys and forbidden otherwise.
   - `FakeSettings.fidelity`.
   - `StudyConfig.screening: ScreeningConfig(fidelity_repeats ≥ 1 = 1, nars_instrument: InstrumentName = "fidelity_nars")`.
   - `PersonaFrame.nars_bands`: allow `[]` (an absent key keeps today's default `[low, high]`).
-- [ ] `src/consortium/config/load.py` -- Add `load_fidelity_instruments(study, cfg) -> list[InstrumentDef]` (BFI-10, plus the selected NARS Instrument when the frame has bands; resolved like any Instrument, user folder first, not gated by `study.instruments`). The NARS one must be `self_report`, every key `nars`, each of `s1`, `s2`, `s3` keyed at least once (else `config_invalid`, field `screening.nars_instrument`); `draft: true` logs `draft_instrument: <name>`. `load_test` refuses a `self_report` Instrument with `instrument_not_allowed`. Skip the NARS-sentence check when there are no bands.
-- [ ] `src/consortium/instruments/fidelity_bfi10.yaml`, `fidelity_nars.yaml` -- Self-report Instruments, 5-point. BFI-10 Items `bfi_1..bfi_10` with the stem "I see myself as someone who…", keyed as in Rammstedt & John (2007): E 1R/6, A 2/7R, C 3R/8, N 4R/9, O 5R/10, with `citation`. `fidelity_nars`: `draft: true`, Items `nars_1..nars_14` keyed `nars` with the Nomura et al. (2006) subscale mapping (S1: 4, 7, 8, 9, 10, 12; S2: 1, 2, 11, 13, 14; S3: 3, 5, 6, reversed), neutral placeholder text (not the published items).
-- [ ] `src/consortium/templates/nars_instrument.yaml` -- Same ids, subscales and reversed flags as `fidelity_nars`, empty `text` placeholders, a `citation` field, `name` to set, `draft: false`. A test asserts its structure equals `fidelity_nars`'s.
-- [ ] `src/consortium/core/personas.py` -- Zero bands: generate over one band-less block (`nars = None`), Persona order profile then replicate; `render_card` omits the NARS line (6 lines); tallies treat `None` as an empty value. Non-empty bands: unchanged bytes.
-- [ ] `src/consortium/core/plan.py`, `core/hashes.py`, `core/fidelity.py` -- The clip-less shape, the stamps, and `score_fidelity` returning `FidelityScore(per_trait, matched, total, ratio)`.
-- [ ] `src/consortium/raters/fake.py` -- The fidelity modes (see Always).
-- [ ] `src/consortium/board/db.py`, `board/screening.py` -- Migration 6 (`m6_screening`) adds:
+- [x] `src/consortium/config/load.py` -- Add `load_fidelity_instruments(study, cfg) -> list[InstrumentDef]` (BFI-10, plus the selected NARS Instrument when the frame has bands; resolved like any Instrument, user folder first, not gated by `study.instruments`). The NARS one must be `self_report`, every key `nars`, each of `s1`, `s2`, `s3` keyed at least once (else `config_invalid`, field `screening.nars_instrument`); `draft: true` logs `draft_instrument: <name>`. `load_test` refuses a `self_report` Instrument with `instrument_not_allowed`. Skip the NARS-sentence check when there are no bands.
+- [x] `src/consortium/instruments/fidelity_bfi10.yaml`, `fidelity_nars.yaml` -- Self-report Instruments, 5-point. BFI-10 Items `bfi_1..bfi_10` with the stem "I see myself as someone who…", keyed as in Rammstedt & John (2007): E 1R/6, A 2/7R, C 3R/8, N 4R/9, O 5R/10, with `citation`. `fidelity_nars`: `draft: true`, Items `nars_1..nars_14` keyed `nars` with the Nomura et al. (2006) subscale mapping (S1: 4, 7, 8, 9, 10, 12; S2: 1, 2, 11, 13, 14; S3: 3, 5, 6, reversed), neutral placeholder text (not the published items).
+- [x] `src/consortium/templates/nars_instrument.yaml` -- Same ids, subscales and reversed flags as `fidelity_nars`, empty `text` placeholders, a `citation` field, `name` to set, `draft: false`. A test asserts its structure equals `fidelity_nars`'s.
+- [x] `src/consortium/core/personas.py` -- Zero bands: generate over one band-less block (`nars = None`), Persona order profile then replicate; `render_card` omits the NARS line (6 lines); tallies treat `None` as an empty value. Non-empty bands: unchanged bytes.
+- [x] `src/consortium/core/plan.py`, `core/hashes.py`, `core/fidelity.py` -- The clip-less shape, the stamps, and `score_fidelity` returning `FidelityScore(per_trait, matched, total, ratio)`.
+- [x] `src/consortium/raters/fake.py` -- The fidelity modes (see Always).
+- [x] `src/consortium/board/db.py`, `board/screening.py` -- Migration 6 (`m6_screening`) adds:
   - `screening_runs(run_id, kind fidelity|perception, screening_test NULL, started_at, status open|complete, superseded_by NULL)`;
   - `screening_results(run_id, model_id, agent_id NULL, instrument, outcome pass|fail, score, threshold, settings_hash, instrument_hash, detail, pair_checks NULL, source_study NULL, source_hash NULL)` — `pair_checks` is filled by 3.2, the source columns by 3.4.
   Helpers: `next_run_id`, `new_run` (run, tests row and Trials in one transaction), `open_run(kind, screening_test)`, `record_result`, `complete_run` (results, status and supersession in one transaction), `current_results` (rows of complete, non-superseded runs; on a duplicate key the highest run number wins), `any_runs`.
-- [ ] `src/consortium/stages/screen.py`, `cli.py` -- `screen_personas(study, yes, ceiling, resume, confirm, announce)` and `consortium screen personas [--yes] [--ceiling USD] [--resume] [--study PATH]`. Print the run summary and the pass/fail counts per Model.
-- [ ] `src/consortium/stages/push.py`, `stages/export.py` -- Reserve `^s[0-9]+$` (`bad_test_name`). Export refuses a `screening` Test with `screening_not_exportable`.
-- [ ] `docs/INTERFACE.md`, `templates/study/study.yaml` -- Document the command, `screening.fidelity_repeats`, `screening.nars_instrument`, `fake.fidelity`, `nars_bands: []` (6-line cards, `nars: null`, empty `persona_nars`), the new codes, and the 3 NARS steps: (1) copy `templates/nars_instrument.yaml` to `<study>/instruments/<name>.yaml` and set `name`; (2) fill each Item's `text` and the `citation` from Nomura et al. (2006); (3) set `screening.nars_instrument: <name>`.
-- [ ] `tests/test_screen_personas.py`, `test_fidelity.py`, `test_hashes.py`, `test_personas.py` -- Every matrix row. Scoring edge cases: midpoint, reversal, partial answers, 5-check ratio. Zero-band Panel; full-grid Panel bytes unchanged.
+- [x] `src/consortium/stages/screen.py`, `cli.py` -- `screen_personas(study, yes, ceiling, resume, confirm, announce)` and `consortium screen personas [--yes] [--ceiling USD] [--resume] [--study PATH]`. Print the run summary and the pass/fail counts per Model.
+- [x] `src/consortium/stages/push.py`, `stages/export.py` -- Reserve `^s[0-9]+$` (`bad_test_name`). Export refuses a `screening` Test with `screening_not_exportable`.
+- [x] `docs/INTERFACE.md`, `templates/study/study.yaml` -- Document the command, `screening.fidelity_repeats`, `screening.nars_instrument`, `fake.fidelity`, `nars_bands: []` (6-line cards, `nars: null`, empty `persona_nars`), the new codes, and the 3 NARS steps: (1) copy `templates/nars_instrument.yaml` to `<study>/instruments/<name>.yaml` and set `name`; (2) fill each Item's `text` and the `citation` from Nomura et al. (2006); (3) set `screening.nars_instrument: <name>`.
+- [x] `tests/test_screen_personas.py`, `test_fidelity.py`, `test_hashes.py`, `test_personas.py` -- Every matrix row. Scoring edge cases: midpoint, reversal, partial answers, 5-check ratio. Zero-band Panel; full-grid Panel bytes unchanged.
 
 **Acceptance Criteria:**
 - Given a screening run, then every Archive request has no Clip and carries the Persona card, and a concurrent `open` or `screen` refuses with `study_busy`.
@@ -118,6 +119,26 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH | settings_hash computed at scoring time, so a resume after a settings change mis-stamps | high | patch (record at run creation; refuse resume on change) |
+| 2 | BH, EC, VG | Stuck open run can never be abandoned; all-terminal unscored path untested | high | patch (--abandon + tests) |
+| 3 | BH | Real Models screened against placeholder NARS bias every Agent to fail; not recorded | high | patch (refuse non-fake + draft) |
+| 4 | BH | Placeholder item text leaks subscale keys to the Model | medium | patch |
+| 5 | BH, EC | Panel/frame NARS mismatch and mixed index.json unchecked | medium | patch |
+| 6 | EC | Duplicate item ids across fidelity Instruments overwrite keys | medium | patch |
+| 7 | BH | A partial re-run supersedes all earlier results | medium | patch (per-key current results, UNIQUE, ms timestamps) |
+| 8 | BH | Stamps ignore the prompt composer and card wording | medium | patch |
+| 9 | BH | Pass/fail on almost no valid data | medium | patch (insufficient_data) |
+| 10 | BH | No --dry-run for screening; no results view | low | patch (--dry-run); results view deferred to Epic 4 rater-flow |
+| 11 | BH, VG | open s<n> gives a misleading refusal | low | patch |
+| 12 | EC | Completed-but-paused run exits 1 asking to resume | low | patch |
+| 13 | EC | Missing tests row skips the sha check | low | patch |
+| 14 | BH | ItemKey duplicates trait names; getattr default | low | patch |
+| 15 | BH, VG | INTERFACE stale rows and missing tags | low | patch (docs) |
+| 16 | VG | Boundary, resume test_changed, finish-only, ItemKey validators untested | medium | patch (tests) |
+| 17 | EC | NARS check allows missing subscales | false | Architect note in the Code Map: S1-only short forms are valid by design |
 
 ## Design Notes
 

@@ -328,7 +328,7 @@ def test_force_failure_keeps_old_panel(study: Path, monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ("nars_bands: [low, high]", "nars_bands: []"),
+        ("nars_bands: [low, high]", "nars_bands: [low, low]"),
         ("gender: [woman, man]", "gender: []"),
     ],
 )
@@ -1109,3 +1109,44 @@ def test_no_quota_warning_for_template(study: Path, caplog: pytest.LogCaptureFix
     with caplog.at_level(logging.WARNING):
         generate_personas(load_study(study))
     assert "quota_levels_empty" not in caplog.text
+
+
+# --------------------------------------------------------------------------- story 3.1
+
+
+def test_zero_nars_bands_panel(study: Path) -> None:
+    from consortium.core.personas import attribute_values, tally_by_attribute
+
+    _edit(study / "study.yaml", "nars_bands: [low, high]", "nars_bands: []")
+    _edit(study / "study.yaml", "fraction: 1\n", "fraction: 1/2\n")
+    _edit(study / "study.yaml", "replicates: 1\n", "replicates: 2\n")
+    personas = generate(study)
+    assert len(personas) == 16 * 2  # profiles x replicates x max(1, 0)
+    assert all(p.nars is None for p in personas)
+    # Persona order: profile, then replicate.
+    assert personas[0].big_five == personas[1].big_five != personas[2].big_five
+    index = json.loads((study / "panel" / "personas" / "index.json").read_text())
+    assert all(entry["nars"] is None for entry in index)
+    assert load_personas(study) == personas
+    wording = load_card_wording()
+    for p in personas:
+        card = (study / "panel" / "personas" / f"{p.id}.md").read_text()
+        assert card == render_card(p, wording)
+        lines = card.splitlines()
+        assert len(lines) == 6 and not any(line in wording.nars.values() for line in lines)
+    assert attribute_values(personas[0])["persona_nars"] == ""
+    tallies = tally_by_attribute({"p1": {"trials": 2}}, {p.id: p for p in personas})
+    assert tallies["persona_nars"] == {"": tallies["persona_nars"][""]}
+    assert tallies["persona_nars"][""]["trials"] == 2
+    # Marginals still balanced across the one band-less block.
+    counts = Counter(p.gender for p in personas)
+    assert set(counts.values()) == {16}
+
+
+def test_absent_nars_bands_keeps_two_bands(study: Path) -> None:
+    _edit(study / "study.yaml", "  nars_bands: [low, high]\n", "")
+    assert load_study(study).personas.nars_bands == ["low", "high"]
+    assert len(generate(study)) == 64
+    assert hashlib.sha256(
+        (study / "panel" / "personas" / "index.json").read_bytes()).hexdigest() == (
+        GOLDEN_INDEX_SHA256)

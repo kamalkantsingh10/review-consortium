@@ -1,0 +1,44 @@
+# Built-in self-report Instrument for Persona-fidelity screening (story 3.1):
+# BFI-10, the 10-item short form of the Big Five Inventory (Rammstedt & John, 2007).
+# Open access via GESIS for non-commercial research; cite the source below.
+# Two items per trait, one of them reverse-keyed. TIPI (Gosling, Rentfrow & Swann,
+# 2003) is the noted fallback. Screening only: a Test that lists it is refused.
+schema_version: 1
+name: fidelity_bfi10
+version: "1"
+draft: false
+self_report: true
+citation: >-
+  Rammstedt, B., & John, O. P. (2007). Measuring personality in one minute or less:
+  A 10-item short version of the Big Five Inventory in English and German.
+  Journal of Research in Personality, 41(1), 203-212.
+instructions: >-
+  How well do the following statements describe your personality? Each statement
+  completes the sentence "I see myself as someone who...". Answer as the person
+  described above, from 1 (disagree strongly) to 5 (agree strongly).
+prompt_variants:
+  default: >-
+    Answer every statement with one whole number from 1 to 5.
+items:
+  - {id: bfi_1, type: likert, text: "I see myself as someone who is reserved", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_2, type: likert, text: "I see myself as someone who is generally trusting", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_3, type: likert, text: "I see myself as someone who tends to be lazy", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_4, type: likert, text: "I see myself as someone who is relaxed, handles stress well", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_5, type: likert, text: "I see myself as someone who has few artistic interests", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_6, type: likert, text: "I see myself as someone who is outgoing, sociable", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_7, type: likert, text: "I see myself as someone who tends to find fault with others", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_8, type: likert, text: "I see myself as someone who does a thorough job", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_9, type: likert, text: "I see myself as someone who gets nervous easily", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+  - {id: bfi_10, type: likert, text: "I see myself as someone who has an active imagination", points: 5, anchors: {low: Disagree strongly, high: Agree strongly}}
+# Scoring keys (never shown to a Model): E 1R/6, A 2/7R, C 3R/8, N 4R/9, O 5R/10.
+keys:
+  bfi_1: {construct: extraversion, reversed: true}
+  bfi_2: {construct: agreeableness, reversed: false}
+  bfi_3: {construct: conscientiousness, reversed: true}
+  bfi_4: {construct: neuroticism, reversed: true}
+  bfi_5: {construct: openness, reversed: true}
+  bfi_6: {construct: extraversion, reversed: false}
+  bfi_7: {construct: agreeableness, reversed: true}
+  bfi_8: {construct: conscientiousness, reversed: false}
+  bfi_9: {construct: neuroticism, reversed: false}
+  bfi_10: {construct: openness, reversed: false}

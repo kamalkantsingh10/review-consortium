@@ -238,7 +238,7 @@ def test_missing_threshold_key(study: Path, old: str, field: str) -> None:
         ("schema_version: 1", "schema_version: 2", "schema_version"),
         ("[none, some, regular]", "[none, none]", "personas.quotas.robot_experience"),
         ("[none, some, regular]", "[]", "personas.quotas.robot_experience"),
-        ("nars_bands: [low, high]", "nars_bands: []", "personas.nars_bands"),
+        ("nars_bands: [low, high]", "nars_bands: [low, low]", "personas.nars_bands"),
     ],
 )
 def test_invalid_study_fields(study: Path, old: str, new: str, field: str) -> None:

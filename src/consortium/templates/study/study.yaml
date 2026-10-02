@@ -27,6 +27,7 @@ models:
       transient_rate: 0     # 0-1: share of attempts that hit a simulated rate limit / transport error
       refusal_rate: 0       # 0-1: share of attempts that are refused (Trial ends refused)
       fatal_rate: 0         # 0-1: share of attempts that fail fatally (Trial ends failed)
+      fidelity: random      # random | faithful | unfaithful: how keyed self-report Items are answered (screen personas)
   # A Gemini Model (uncomment to use; the key is read from GEMINI_API_KEY, never from here).
   # It also needs a matching prices.yaml entry, with media_tokens_per_s for its
   # media_resolution and fps (per-frame tokens x fps + 32 audio tokens/s), e.g. for low at 1 fps:
@@ -78,8 +79,17 @@ thresholds:
     duration_s: 1.0
     loudness_lufs: 2.0
 
+# Persona-fidelity screening (consortium screen personas): each Agent answers BFI-10 and,
+# when nars_bands is not empty, the NARS Instrument below, fidelity_repeats times.
+# fidelity_nars is a structure-only placeholder (draft); to use the published NARS items,
+# copy the package template templates/nars_instrument.yaml to instruments/<name>.yaml,
+# fill in the items and citation (Nomura et al., 2006), and set nars_instrument: <name>.
+screening:
+  fidelity_repeats: 1
+  nars_instrument: fidelity_nars
+
 # Persona frame: Big Five profiles x replicates x NARS bands, quota-balanced on four
-# attributes. fraction: 1 (all 32 profiles), 1/2 (16, resolution V) or 1/4 (8,
+# attributes. nars_bands: [] means no NARS band (6-line cards, nars: null). fraction: 1 (all 32 profiles), 1/2 (16, resolution V) or 1/4 (8,
 # resolution III); replicates: 1-3 copies of each profile with fresh demographics.
 # Trials scale with the Panel size, so a half fraction halves the cost.
 personas:

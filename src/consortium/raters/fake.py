@@ -25,12 +25,24 @@ hit decides. A transient ``raw`` alternates with the attempt number between a
 simulated rate limit (odd attempts) and a simulated transport error (even). The
 outcome is decided at submit time and carried in the handle (``category``);
 ``collect`` returns it, with zero usage for every non-``ok`` result.
+
+Persona fidelity (story 3.1): ``fidelity`` is ``random`` (default: every Item as
+above, byte-identical to before), ``faithful`` or ``unfaithful``. With ``cues``
+(``FidelityCues``: card sentence -> ``(construct, pole)`` and keyed Item id ->
+``(construct, reversed)``), a keyed Likert Item whose construct appears on the
+request's Persona card is answered ``points`` when the pole is ``high`` XOR the Item
+is reversed and ``1`` otherwise (``faithful``), or the opposite (``unfaithful``).
+Every other Item is answered at random as above; the random stream is drawn for
+every Item either way, so unkeyed answers do not depend on the mode.
 """
 
 from __future__ import annotations
 
 import json
 import random
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Literal
 
 from consortium.core.render import ClipRef, TrialRequest, canonical_json
 from consortium.core.seeds import derive_seed
@@ -53,6 +65,26 @@ TRANSIENT_RAW = (
 )
 REFUSED_RAW = "simulated refusal: the request was blocked for safety reasons"
 FATAL_RAW = "simulated fatal error: 400 INVALID_ARGUMENT"
+
+Fidelity = Literal["random", "faithful", "unfaithful"]
+
+
+@dataclass(frozen=True)
+class FidelityCues:
+    """What a faithful or unfaithful Fake rater reads (story 3.1)."""
+
+    sentences: Mapping[str, tuple[str, str]] = field(default_factory=dict)  # -> (construct, pole)
+    keys: Mapping[str, tuple[str, bool]] = field(default_factory=dict)  # -> (construct, reversed)
+
+
+def card_poles(card: str, cues: FidelityCues) -> dict[str, str]:
+    """``construct -> pole`` for every card line that is a known sentence."""
+    out: dict[str, str] = {}
+    for line in card.splitlines():
+        found = cues.sentences.get(line)
+        if found is not None:
+            out[found[0]] = found[1]
+    return out
 
 
 def _hit(seed: int, kind: str, rate: float) -> bool:
@@ -94,12 +126,18 @@ def is_invalid_attempt(seed: int, invalid_rate: float) -> bool:
     return random.Random(derive_seed(seed, INVALID_PURPOSE, "")).random() < invalid_rate
 
 
-def fake_invalid_answer(request: TrialRequest, seed: int, attempt: int) -> str:
+def fake_invalid_answer(
+    request: TrialRequest,
+    seed: int,
+    attempt: int,
+    fidelity: Fidelity = "random",
+    cues: FidelityCues | None = None,
+) -> str:
     """An invalid raw answer, of kind ``INVALID_KINDS[(attempt - 1) % 3]``."""
     kind = INVALID_KINDS[(attempt - 1) % len(INVALID_KINDS)]
     if kind == "not_json":
         return NOT_JSON_ANSWER
-    answer = json.loads(fake_answer(request, seed))
+    answer = json.loads(fake_answer(request, seed, fidelity, cues))
     first = request.items[0]
     if kind == "missing_item":
         del answer[first.id]
@@ -112,13 +150,26 @@ def fake_invalid_answer(request: TrialRequest, seed: int, attempt: int) -> str:
     return canonical_json(answer).decode("utf-8")
 
 
-def fake_answer(request: TrialRequest, seed: int) -> str:
+def fake_answer(
+    request: TrialRequest,
+    seed: int,
+    fidelity: Fidelity = "random",
+    cues: FidelityCues | None = None,
+) -> str:
     """The raw answer the Fake rater gives to ``request`` with ``seed``."""
     rng = random.Random(seed)
+    poles = card_poles(request.persona_card, cues) if fidelity != "random" and cues else {}
     answer: dict[str, int | str] = {}
     for item in request.items:
         if item.type == "likert":
-            answer[item.id] = rng.randint(1, item.points or 1)
+            points = item.points or 1
+            answer[item.id] = rng.randint(1, points)
+            key = cues.keys.get(item.id) if poles and cues else None
+            if key is not None and key[0] in poles:
+                high = (poles[key[0]] == "high") != key[1]
+                if fidelity == "unfaithful":
+                    high = not high
+                answer[item.id] = points if high else 1
         elif item.type == "pairwise":
             answer[item.id] = rng.choice(list(item.options or ("A", "B")))
         else:
@@ -140,7 +191,11 @@ class FakeRater:
         transient_rate: float = 0.0,
         refusal_rate: float = 0.0,
         fatal_rate: float = 0.0,
+        fidelity: Fidelity = "random",
+        cues: FidelityCues | None = None,
     ) -> None:
+        self.fidelity = fidelity
+        self.cues = cues
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.invalid_rate = invalid_rate
@@ -155,8 +210,10 @@ class FakeRater:
     def answer(self, call: RaterCall) -> str:
         """The raw answer to ``call`` (valid, or invalid at ``invalid_rate``)."""
         if is_invalid_attempt(call.seed, self.invalid_rate):
-            return fake_invalid_answer(call.request, call.seed, call.attempt)
-        return fake_answer(call.request, call.seed)
+            return fake_invalid_answer(
+                call.request, call.seed, call.attempt, self.fidelity, self.cues
+            )
+        return fake_answer(call.request, call.seed, self.fidelity, self.cues)
 
     async def prepare(self, clip: ClipRef) -> MediaRef:
         return MediaRef(clip.clip_id, clip.sha256, f"fake:{clip.clip_id}")

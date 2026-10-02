@@ -295,6 +295,7 @@ def _display_path(path: Path, study: Path) -> str:
 
 
 RESERVED_TEST_SUFFIX = "-attrition"  # exports/<test>-attrition.csv is the export sidecar
+_SCREENING_RUN_NAME = re.compile(r"^s[0-9]+$")  # screening run IDs s<n> (story 3.1)
 
 
 def _check_name(name: str, fail: Fail) -> None:
@@ -303,6 +304,11 @@ def _check_name(name: str, fail: Fail) -> None:
             "bad_test_name",
             f"test: {name!r} must match {TEST_NAME_PATTERN} and be at most {TEST_NAME_MAX} "
             "characters (it is part of every Session ID)",
+        )
+    if _SCREENING_RUN_NAME.fullmatch(name):
+        raise fail(
+            "bad_test_name",
+            f"test: {name!r} is reserved: names s<n> are screening run IDs",
         )
     if name.endswith(RESERVED_TEST_SUFFIX):
         raise fail(

@@ -73,26 +73,31 @@ def insert_plan(conn: sqlite3.Connection, test: str, trials: Iterable[Trial]) ->
     Returns the number of Trials inserted.
     """
     with transaction(conn):
-        if count_trials(conn, test):
-            raise ConsortiumError(
-                "test_already_open",
-                f"Test {test!r} already has Trials; use --resume to continue it",
-            )
-        rows = []
-        for seq, t in enumerate(trials):
-            if t.test != test:
-                raise ValueError(f"Trial {t.trial_id} belongs to Test {t.test!r}, not {test!r}")
-            rows.append((
-                t.trial_id, t.test, t.session_id, t.trial_index, t.instrument,
-                canonical_json(list(t.clip_ids)).decode("utf-8"), t.pair_id, t.position,
-                t.prompt_variant,
-                t.order_seed, t.repeat, t.agent_id, t.persona_id, t.model_id, seq,
-            ))
-        conn.executemany(
-            f"INSERT INTO trials ({', '.join(_TRIAL_COLUMNS)}, seq)"
-            f" VALUES ({', '.join('?' * (len(_TRIAL_COLUMNS) + 1))})",
-            rows,
+        return insert_trials(conn, test, trials)
+
+
+def insert_trials(conn: sqlite3.Connection, test: str, trials: Iterable[Trial]) -> int:
+    """``insert_plan`` inside the caller's transaction."""
+    if count_trials(conn, test):
+        raise ConsortiumError(
+            "test_already_open",
+            f"Test {test!r} already has Trials; use --resume to continue it",
         )
+    rows = []
+    for seq, t in enumerate(trials):
+        if t.test != test:
+            raise ValueError(f"Trial {t.trial_id} belongs to Test {t.test!r}, not {test!r}")
+        rows.append((
+            t.trial_id, t.test, t.session_id, t.trial_index, t.instrument,
+            canonical_json(list(t.clip_ids)).decode("utf-8"), t.pair_id, t.position,
+            t.prompt_variant,
+            t.order_seed, t.repeat, t.agent_id, t.persona_id, t.model_id, seq,
+        ))
+    conn.executemany(
+        f"INSERT INTO trials ({', '.join(_TRIAL_COLUMNS)}, seq)"
+        f" VALUES ({', '.join('?' * (len(_TRIAL_COLUMNS) + 1))})",
+        rows,
+    )
     return len(rows)
 
 

@@ -72,3 +72,9 @@ name = "AD-1 core imports only stdlib and pydantic"
 type = "forbidden"
 source_modules = ["consortium.core"]
 forbidden_modules = ["yaml", "typer", "google", "openai"]
+
+[[tool.importlinter.contracts]]
+name = "AD-6 the engine never reads Study files (config.load) or YAML"
+type = "forbidden"
+source_modules = ["consortium.engine"]
+forbidden_modules = ["consortium.config.load", "yaml"]

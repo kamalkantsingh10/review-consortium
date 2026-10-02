@@ -15,6 +15,8 @@
   ``random.Random(derive_seed(study.seed, "order", session_id))`` (an explicit
   Fisher-Yates over ``getrandbits``, as for Personas), then numbered
   ``trial_index`` 1..n. ``trial_id = <session_id>/t<trial_index>``.
+* **Self-report** Instruments (story 3.1, ``self_report: true``): one clip-less
+  Trial per Session (``clip_ids = ()``), whatever the Test's Clips.
 * **Prompt variant**: Repeat ``r`` uses the ``(r - 1) mod n``-th of the
   Instrument's ``prompt_variants`` in declared order.
 """
@@ -58,6 +60,7 @@ class _Test(Protocol):
 
 class _Instrument(Protocol):
     prompt_variants: Mapping[str, str]
+    self_report: bool
 
     @property
     def pairwise(self) -> bool: ...
@@ -153,7 +156,9 @@ def canonical_trials(
     """The unshuffled Trial list of one Session (see the module docstring)."""
     out: list[_Shape] = []
     for name in instrument_names:
-        if instruments[name].pairwise:
+        if instruments[name].self_report:
+            out.append((name, (), None, None))
+        elif instruments[name].pairwise:
             for a, b in itertools.combinations(clips, 2):
                 lo, hi = sorted((a, b))
                 pid = pair_id(name, lo, hi)

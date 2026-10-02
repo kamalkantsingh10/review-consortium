@@ -5,8 +5,9 @@ E, A, N, ordered by bit pattern with ``low`` = 0 and O most significant), or the
 principal half or quarter fraction of them (``design_profiles``; the kept profiles
 stay in that order). Each profile is repeated ``replicates`` times and each copy is
 crossed with every NARS band in frame order: Persona order is profile, then
-replicate, then band (band fastest). Each quota attribute is assigned independently
-and stratified by NARS band:
+replicate, then band (band fastest). With no NARS band (``nars_bands: []``, story 3.1)
+the Panel is one band-less block (``nars`` is None), in profile then replicate order.
+Each quota attribute is assigned independently and stratified by NARS band:
 
 1. The N levels are laid out round-robin in listed order (level 0, 1, ..., k-1,
    0, 1, ...), so the marginal counts are equal with the remainder going one
@@ -66,7 +67,7 @@ class Persona(BaseModel):
 
     id: StrictStr
     big_five: dict[Trait, Pole]
-    nars: Literal["low", "high"]
+    nars: Literal["low", "high"] | None  # None: the frame has no NARS band (story 3.1)
     age_band: StrictStr
     gender: StrictStr
     cultural_region: StrictStr
@@ -350,12 +351,13 @@ def _warn_empty_levels(
 def generate_personas(cfg: _Study) -> list[Persona]:
     """The Persona pool for ``cfg`` (a ``StudyConfig``): ``p1 ... pN``.
 
-    N = profiles x replicates x bands, where the profiles come from
+    N = profiles x replicates x max(1, bands), where the profiles come from
     ``design_profiles(cfg.personas.big_five.fraction)``; order is profile, then
-    replicate, then band.
+    replicate, then band. With no band, every Persona has ``nars = None``.
     """
     frame = cfg.personas
-    bands = list(frame.nars_bands)
+    bands: list[str | None] = list(frame.nars_bands) or [None]
+    names = [band or "none" for band in bands]
     replicates = frame.big_five.replicates
     profiles, _ = design_profiles(frame.big_five.fraction, replicates)
     grid = [
@@ -374,8 +376,8 @@ def generate_personas(cfg: _Study) -> list[Persona]:
         )
         for attr in QUOTA_ATTRIBUTES
     }
-    _warn_empty_levels(blocks, levels, bands)
-    _separate_replicates(blocks, replicates, bands)
+    _warn_empty_levels(blocks, levels, names)
+    _separate_replicates(blocks, replicates, names)
     out = []
     for i, (profile, band) in enumerate(grid):
         b, slot = i % len(bands), i // len(bands)
@@ -394,7 +396,8 @@ def render_card(persona: Persona, wording: _Wording) -> str:
     """The behaviour-only card text the Model sees.
 
     Demographic line, the five trait sentences in O, C, E, A, N order, then the NARS
-    sentence; one per line, LF, one trailing newline. No ID and no labels.
+    sentence (none when ``persona.nars`` is None: 6 lines); one per line, LF, one
+    trailing newline. No ID and no labels.
     """
     phrases = wording.level_phrases
     values = {}
@@ -407,6 +410,8 @@ def render_card(persona: Persona, wording: _Wording) -> str:
     lines = [wording.demographic.format(**values)]
     for trait in TRAITS:
         lines.append(getattr(getattr(wording.traits, trait), persona.big_five[trait]))
+    if persona.nars is None:
+        return "\n".join(lines) + "\n"
     try:
         lines.append(wording.nars[persona.nars])
     except KeyError as err:
@@ -454,7 +459,8 @@ def attribute_names() -> list[str]:
 
 
 def attribute_values(persona: Persona) -> dict[str, str]:
-    """``{persona_<field>: value}`` in ``attribute_names`` order."""
+    """``{persona_<field>: value}`` in ``attribute_names`` order; None (no NARS band) is
+    the empty value ``""``."""
     out: dict[str, str] = {}
     for name in Persona.model_fields:
         if name == "id":
@@ -462,7 +468,8 @@ def attribute_values(persona: Persona) -> dict[str, str]:
         if name == "big_five":
             out.update({f"persona_{trait}": persona.big_five[trait] for trait in TRAITS})
         else:
-            out[f"persona_{name}"] = getattr(persona, name)
+            value = getattr(persona, name)
+            out[f"persona_{name}"] = "" if value is None else value
     return out
 
 

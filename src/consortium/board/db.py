@@ -154,8 +154,60 @@ def m5_validation(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE attempts ADD COLUMN answer_json TEXT")
 
 
+def m6_screening(conn: sqlite3.Connection) -> None:
+    """Story 3.1: screening runs (``s<n>``) and their stamped results; never overwritten.
+
+    A run's Trials belong to the ``tests`` row named after the run (kind ``screening``).
+    ``settings_hashes`` (canonical JSON ``{model_id: settings_hash}``) and
+    ``instrument_hash`` are the stamps recorded when the run was created.
+    ``superseded_by`` names the newer run once every result key of a complete run is
+    covered by later complete runs; ``abandoned`` runs are never scored. Result rows are
+    only inserted, one per ``(run_id, instrument, model_id, agent_id)``: ``pair_checks``
+    is filled by perception screening (3.2), the
+    ``source_*`` columns by a Panel copy (3.4). ``IF NOT EXISTS``: a board.db whose
+    ``user_version`` was rolled back by hand keeps its screening tables.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screening_runs (
+            run_id         TEXT PRIMARY KEY,
+            kind           TEXT NOT NULL CHECK (kind IN ('fidelity', 'perception')),
+            screening_test TEXT,
+            started_at     TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('open', 'complete', 'abandoned')),
+            superseded_by  TEXT,
+            settings_hashes TEXT NOT NULL,
+            instrument_hash TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screening_results (
+            run_id          TEXT NOT NULL REFERENCES screening_runs(run_id),
+            model_id        TEXT NOT NULL,
+            agent_id        TEXT,
+            instrument      TEXT NOT NULL,
+            outcome         TEXT NOT NULL CHECK (outcome IN ('pass', 'fail')),
+            score           REAL NOT NULL,
+            threshold       REAL NOT NULL,
+            settings_hash   TEXT NOT NULL,
+            instrument_hash TEXT NOT NULL,
+            detail          TEXT NOT NULL,
+            pair_checks     INTEGER,
+            source_study    TEXT,
+            source_hash     TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS screening_results_key"
+        " ON screening_results (run_id, instrument, model_id, ifnull(agent_id, ''))"
+    )
+
+
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
-    m1_clips, m2_tests, m3_trials, m4_cost, m5_validation,
+    m1_clips, m2_tests, m3_trials, m4_cost, m5_validation, m6_screening,
 ]
 
 

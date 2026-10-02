@@ -39,6 +39,17 @@
           "title": "Fatal Rate",
           "type": "number"
         },
+        "fidelity": {
+          "default": "random",
+          "description": "How the Fake rater answers keyed self-report Items (story 3.1): random (as any Item), faithful (follows the Persona card) or unfaithful (the opposite).",
+          "enum": [
+            "random",
+            "faithful",
+            "unfaithful"
+          ],
+          "title": "Fidelity",
+          "type": "string"
+        },
         "input_tokens": {
           "default": 0,
           "minimum": 0,
@@ -347,6 +358,7 @@
           "description": "The profile design; the legacy value \"all_32\" means the full grid."
         },
         "nars_bands": {
+          "description": "NARS bands crossed with the profiles; [] means no NARS band (6-line cards, nars: null, no NARS fidelity check). Absent means [low, high].",
           "items": {
             "enum": [
               "low",
@@ -354,7 +366,6 @@
             ],
             "type": "string"
           },
-          "minItems": 1,
           "title": "Nars Bands",
           "type": "array"
         },
@@ -437,6 +448,28 @@
         }
       },
       "title": "RetryPolicy",
+      "type": "object"
+    },
+    "ScreeningConfig": {
+      "additionalProperties": false,
+      "description": "Persona-fidelity screening (story 3.1).",
+      "properties": {
+        "fidelity_repeats": {
+          "default": 1,
+          "description": "Sessions per Agent in a fidelity screening run.",
+          "minimum": 1,
+          "title": "Fidelity Repeats",
+          "type": "integer"
+        },
+        "nars_instrument": {
+          "default": "fidelity_nars",
+          "description": "The NARS self-report Instrument used for fidelity screening: the built-in placeholder fidelity_nars, or a user Instrument in instruments/.",
+          "pattern": "^[a-z0-9][a-z0-9_]*$",
+          "title": "Nars Instrument",
+          "type": "string"
+        }
+      },
+      "title": "ScreeningConfig",
       "type": "object"
     },
     "SessionConfig": {
@@ -537,6 +570,9 @@
       "description": "Config file schema version.",
       "title": "Schema Version",
       "type": "integer"
+    },
+    "screening": {
+      "$ref": "#/$defs/ScreeningConfig"
     },
     "seed": {
       "exclusiveMaximum": 9223372036854775808,

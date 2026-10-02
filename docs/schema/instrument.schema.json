@@ -92,10 +92,69 @@
       ],
       "title": "ItemDef",
       "type": "object"
+    },
+    "ItemKey": {
+      "additionalProperties": false,
+      "description": "How a self-report Item is scored (story 3.1): its construct, whether it is\nreverse-keyed, and (NARS only) its subscale.",
+      "properties": {
+        "construct": {
+          "enum": [
+            "openness",
+            "conscientiousness",
+            "extraversion",
+            "agreeableness",
+            "neuroticism",
+            "nars"
+          ],
+          "title": "Construct",
+          "type": "string"
+        },
+        "reversed": {
+          "title": "Reversed",
+          "type": "boolean"
+        },
+        "subscale": {
+          "anyOf": [
+            {
+              "enum": [
+                "s1",
+                "s2",
+                "s3"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subscale"
+        }
+      },
+      "required": [
+        "construct",
+        "reversed"
+      ],
+      "title": "ItemKey",
+      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
+    "citation": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The published source of the Items.",
+      "title": "Citation"
+    },
     "draft": {
       "default": false,
       "description": "A draft Instrument may not be used in kind: main Tests.",
@@ -115,6 +174,22 @@
       "title": "Items",
       "type": "array"
     },
+    "keys": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/ItemKey"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Scoring keys by Item id (Likert Items only); never shown to a Model.",
+      "title": "Keys"
+    },
     "name": {
       "pattern": "^[a-z0-9][a-z0-9_]*$",
       "title": "Name",
@@ -133,6 +208,12 @@
       "description": "Config file schema version.",
       "title": "Schema Version",
       "type": "integer"
+    },
+    "self_report": {
+      "default": false,
+      "description": "A clip-less questionnaire answered about the Persona itself (screening only; never allowed in a Test). Every Item must be keyed.",
+      "title": "Self Report",
+      "type": "boolean"
     },
     "version": {
       "minLength": 1,

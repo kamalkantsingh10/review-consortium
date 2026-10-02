@@ -1,0 +1,52 @@
+# Template for the NARS fidelity Instrument (story 3.1). The package ships only the
+# structure; fill in the published wording yourself:
+#   1. copy this file to <study>/instruments/<name>.yaml and set `name: <name>`
+#      (any name except fidelity_nars);
+#   2. fill each item's `text` and the `citation` from Nomura, Suzuki, Kanda & Kato
+#      (2006), Interaction Studies 7(3), 437-454 (check the subscale mapping too);
+#   3. set `screening.nars_instrument: <name>` in study.yaml.
+# Item ids, subscales (S1: 4, 7, 8, 9, 10, 12; S2: 1, 2, 11, 13, 14; S3: 3, 5, 6)
+# and reversed flags (S3) must stay as they are. Empty text is refused until filled.
+schema_version: 1
+name: ""
+version: "1"
+draft: false
+self_report: true
+citation: ""
+instructions: >-
+  Below are statements about robots. Answer as the person described above: how
+  much do you agree with each one, from 1 (strongly disagree) to 5 (strongly agree)?
+prompt_variants:
+  default: >-
+    Answer every statement with one whole number from 1 to 5.
+items:
+  - {id: nars_1, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_2, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_3, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_4, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_5, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_6, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_7, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_8, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_9, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_10, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_11, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_12, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_13, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_14, type: likert, text: "", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+# Scoring keys (never shown to a Model).
+keys:
+  nars_1: {construct: nars, subscale: s2, reversed: false}
+  nars_2: {construct: nars, subscale: s2, reversed: false}
+  nars_3: {construct: nars, subscale: s3, reversed: true}
+  nars_4: {construct: nars, subscale: s1, reversed: false}
+  nars_5: {construct: nars, subscale: s3, reversed: true}
+  nars_6: {construct: nars, subscale: s3, reversed: true}
+  nars_7: {construct: nars, subscale: s1, reversed: false}
+  nars_8: {construct: nars, subscale: s1, reversed: false}
+  nars_9: {construct: nars, subscale: s1, reversed: false}
+  nars_10: {construct: nars, subscale: s1, reversed: false}
+  nars_11: {construct: nars, subscale: s2, reversed: false}
+  nars_12: {construct: nars, subscale: s1, reversed: false}
+  nars_13: {construct: nars, subscale: s2, reversed: false}
+  nars_14: {construct: nars, subscale: s2, reversed: false}

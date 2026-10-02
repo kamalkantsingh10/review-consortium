@@ -141,3 +141,29 @@ def test_simulated_outcomes_in_handle_and_collect() -> None:
     legacy = {k: v for k, v in handle.items() if k != "category"}  # a handle from before 2.1
     (old,) = asyncio.run(FakeRater().collect([legacy]))
     assert old.category == "ok"
+
+
+# --------------------------------------------------------------------------- story 3.1
+
+
+def test_fidelity_modes_follow_or_invert_the_card() -> None:
+    from consortium.raters.fake import FidelityCues
+
+    cues = FidelityCues(
+        sentences={"You are calm.": ("neuroticism", "low")},
+        keys={"q1": ("neuroticism", False), "q2": ("neuroticism", True),
+              "other": ("openness", False)},
+    )
+    request = _request(LIKERT, ())
+    for seed in range(20):
+        rand = json.loads(fake_answer(request, seed))
+        faithful = json.loads(fake_answer(request, seed, "faithful", cues))
+        unfaithful = json.loads(fake_answer(request, seed, "unfaithful", cues))
+        # low pole: an unreversed item gets 1, a reversed one gets points.
+        assert (faithful["q1"], faithful["q2"]) == (1, 7)
+        assert (unfaithful["q1"], unfaithful["q2"]) == (5, 1)
+        assert faithful["note"] == unfaithful["note"] == rand["note"]
+        assert fake_answer(request, seed, "random", cues) == fake_answer(request, seed)
+    # A construct that is not on the card is answered at random.
+    off_card = FidelityCues(sentences={}, keys=cues.keys)
+    assert fake_answer(request, 3, "faithful", off_card) == fake_answer(request, 3)

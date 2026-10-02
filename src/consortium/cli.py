@@ -17,6 +17,7 @@ from consortium.stages.export import export_test
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, usd
 from consortium.stages.push import push_clip, push_test
+from consortium.stages.screen import abandon_personas, screen_personas
 from consortium.stages.status import format_table, status
 
 
@@ -181,6 +182,82 @@ def open_cmd(
             "ceiling_reached",
             f"Run paused at the ceiling; continue with "
             f"`consortium open {test} --resume --ceiling <higher USD>`",
+        )
+
+
+screen_app = typer.Typer(help="Screen the Panel before it rates (Persona fidelity).")
+app.add_typer(screen_app, name="screen")
+
+
+@screen_app.command("personas")
+def screen_personas_cmd(
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+    ceiling: Annotated[
+        str | None, typer.Option("--ceiling", help="Cost ceiling in USD, e.g. 5.00.")
+    ] = None,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Continue the open fidelity screening run.")
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Plan and render the next run, print counts and the "
+                     "cost estimate, write nothing."),
+    ] = False,
+    abandon: Annotated[
+        bool,
+        typer.Option("--abandon", help="Mark the open fidelity run abandoned (no results; "
+                     "its Trials and Archive are kept)."),
+    ] = False,
+    study: StudyOption = Path("."),
+) -> None:
+    """Run a Persona-fidelity screening run s<n>: every Agent answers the clip-less BFI-10
+    (and NARS) self-report Instruments; each Agent passes when its answers match its
+    Persona card (thresholds.persona_fidelity_min). Prints the run summary and the
+    pass/fail counts per Model."""
+    if sum((resume, dry_run, abandon)) > 1:
+        raise ConsortiumError(
+            "bad_option", "--resume, --dry-run and --abandon cannot be combined"
+        )
+    if abandon:
+        typer.echo(f"screening run: {abandon_personas(study)} (fidelity) abandoned")
+        return
+    if dry_run:
+        dry = screen_personas(study, ceiling=ceiling, dry_run=True)
+        for line in [*dry.run.lines(), *dry.result_lines()]:
+            typer.echo(line)
+        return
+    announced: list[str] = []
+
+    def announce(lines: list[str]) -> None:  # printed before confirmation and dispatch
+        for line in lines:
+            typer.echo(line)
+        announced.extend(lines)
+
+    summary = screen_personas(
+        study, yes=yes, ceiling=ceiling, resume=resume, confirm=_confirm, announce=announce,
+    )
+    run = summary.run
+    pending = list(announced)
+    for line in run.lines():
+        if line in pending:
+            pending.remove(line)
+        else:
+            typer.echo(line)
+    for line in summary.result_lines():
+        typer.echo(line)
+    if run.ceiling is not None and run.committed is not None and run.committed > run.ceiling:
+        typer.echo(
+            f"ceiling_overshoot: committed {usd(run.committed)} > ceiling "
+            f"{usd(run.ceiling)} (actual cost exceeded the estimate)",
+            err=True,
+        )
+    if run.not_valid:
+        typer.echo(f"warning: {run.not_valid} Trials did not end valid", err=True)
+    if run.paused == "ceiling" and not summary.complete:
+        raise ConsortiumError(
+            "ceiling_reached",
+            "Screening run paused at the ceiling; continue with "
+            "`consortium screen personas --resume --ceiling <higher USD>`",
         )
 
 

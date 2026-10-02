@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import string
+import warnings
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -188,6 +189,11 @@ class FakeSettings(_Strict):
         default=0.0,
         description="Probability (0-1) that an attempt simulates a fatal provider error "
         "(category fatal); decided per attempt seed.",
+    )
+    fidelity: Literal["random", "faithful", "unfaithful"] = Field(
+        default="random",
+        description="How the Fake rater answers keyed self-report Items (story 3.1): random "
+        "(as any Item), faithful (follows the Persona card) or unfaithful (the opposite).",
     )
 
 
@@ -392,8 +398,10 @@ class PersonaFrame(_Strict):
             json_schema_extra=_legacy_big_five_schema,
         ),
     ] = Field(default_factory=BigFiveDesign)
-    nars_bands: Annotated[list[Literal["low", "high"]], Field(min_length=1)] = Field(
-        default_factory=lambda: ["low", "high"]
+    nars_bands: list[Literal["low", "high"]] = Field(
+        default_factory=lambda: ["low", "high"],
+        description="NARS bands crossed with the profiles; [] means no NARS band (6-line "
+        "cards, nars: null, no NARS fidelity check). Absent means [low, high].",
     )
     quotas: Quotas
 
@@ -406,6 +414,19 @@ class PersonaFrame(_Strict):
 InstrumentName = Annotated[StrictStr, Field(pattern=_NAME_PATTERN)]
 
 
+class ScreeningConfig(_Strict):
+    """Persona-fidelity screening (story 3.1)."""
+
+    fidelity_repeats: Annotated[StrictInt, Field(ge=1)] = Field(
+        default=1, description="Sessions per Agent in a fidelity screening run."
+    )
+    nars_instrument: InstrumentName = Field(
+        default="fidelity_nars",
+        description="The NARS self-report Instrument used for fidelity screening: the "
+        "built-in placeholder fidelity_nars, or a user Instrument in instruments/.",
+    )
+
+
 class StudyConfig(_Strict):
     schema_version: SchemaVersion
     seed: Annotated[StrictInt, Field(ge=0, lt=2**63)]
@@ -416,6 +437,7 @@ class StudyConfig(_Strict):
     concurrency: Annotated[StrictInt, Field(ge=1)] = 4
     thresholds: Thresholds
     personas: PersonaFrame
+    screening: ScreeningConfig = Field(default_factory=ScreeningConfig)
 
     @field_validator("instruments")
     @classmethod
@@ -534,6 +556,34 @@ class ItemDef(_Strict):
         return {"type": "string", "minLength": 1}
 
 
+NARS_CONSTRUCT = "nars"
+NARS_SUBSCALES = ("s1", "s2", "s3")
+# A key's construct: a Big Five trait (``core.personas.TRAITS``) or ``nars``.
+Construct = Literal[(*TRAITS, NARS_CONSTRUCT)]  # type: ignore[valid-type]
+
+
+# ``construct`` shadows the deprecated ``BaseModel.construct``; the field name is the
+# documented key name, so the pydantic warning is silenced for this class only.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message='Field name "construct"')
+
+    class ItemKey(_Strict):
+        """How a self-report Item is scored (story 3.1): its construct, whether it is
+        reverse-keyed, and (NARS only) its subscale."""
+
+        construct: Construct
+        reversed: StrictBool
+        subscale: Literal["s1", "s2", "s3"] | None = None
+
+        @model_validator(mode="after")
+        def _subscale_for_nars(self) -> ItemKey:
+            if self.construct == NARS_CONSTRUCT and self.subscale is None:
+                raise ValueError("subscale: required for construct nars (s1, s2 or s3)")
+            if self.construct != NARS_CONSTRUCT and self.subscale is not None:
+                raise ValueError("subscale: only allowed for construct nars")
+            return self
+
+
 class InstrumentDef(_Strict):
     schema_version: SchemaVersion
     name: InstrumentName
@@ -542,9 +592,21 @@ class InstrumentDef(_Strict):
         default=False,
         description="A draft Instrument may not be used in kind: main Tests.",
     )
+    self_report: StrictBool = Field(
+        default=False,
+        description="A clip-less questionnaire answered about the Persona itself (screening "
+        "only; never allowed in a Test). Every Item must be keyed.",
+    )
+    citation: Annotated[StrictStr, Field(min_length=1)] | None = Field(
+        default=None, description="The published source of the Items."
+    )
     instructions: Annotated[StrictStr, Field(min_length=1)]
     prompt_variants: dict[StrictStr, Annotated[StrictStr, Field(min_length=1)]]
     items: Annotated[list[ItemDef], Field(min_length=1)]
+    keys: dict[StrictStr, ItemKey] | None = Field(
+        default=None,
+        description="Scoring keys by Item id (Likert Items only); never shown to a Model.",
+    )
 
     @field_validator("prompt_variants")
     @classmethod
@@ -561,6 +623,24 @@ class InstrumentDef(_Strict):
         if len(kinds) > 1:
             raise ValueError("an Instrument is either all pairwise items or has none")
         return value
+
+    @model_validator(mode="after")
+    def _keys_fit_items(self) -> InstrumentDef:
+        items = {item.id: item for item in self.items}
+        for item_id in self.keys or {}:
+            item = items.get(item_id)
+            if item is None:
+                raise ValueError(f"keys.{item_id}: not an item of this Instrument")
+            if item.type != "likert":
+                raise ValueError(f"keys.{item_id}: only likert items can be keyed")
+        if self.self_report:
+            missing = [i for i in items if i not in (self.keys or {})]
+            if missing:
+                raise ValueError(
+                    f"keys: a self_report Instrument must key every item; missing "
+                    f"{', '.join(missing)}"
+                )
+        return self
 
     @property
     def pairwise(self) -> bool:

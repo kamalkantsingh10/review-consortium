@@ -1,0 +1,52 @@
+# DRAFT — structure only. The published NARS item wording is NOT redistributed here.
+# Built-in placeholder for Persona-fidelity screening (story 3.1): the 14-item
+# Negative Attitudes toward Robots Scale (Nomura, Suzuki, Kanda & Kato, 2006) with
+# its subscale mapping (S1: interaction situations, S2: social influence, S3:
+# emotions in interaction, reverse-keyed) and neutral placeholder text. Supply the
+# real items as a user Instrument (copy templates/nars_instrument.yaml, see
+# docs/INTERFACE.md) and select it with study.yaml screening.nars_instrument.
+schema_version: 1
+name: fidelity_nars
+version: "0-draft"
+draft: true
+self_report: true
+citation: >-
+  Nomura, T., Suzuki, T., Kanda, T., & Kato, K. (2006). Measurement of negative
+  attitudes toward robots. Interaction Studies, 7(3), 437-454.
+instructions: >-
+  Below are statements about robots. Answer as the person described above: how
+  much do you agree with each one, from 1 (strongly disagree) to 5 (strongly agree)?
+prompt_variants:
+  default: >-
+    Answer every statement with one whole number from 1 to 5.
+items:
+  - {id: nars_1, type: likert, text: "Placeholder statement 1 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_2, type: likert, text: "Placeholder statement 2 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_3, type: likert, text: "Placeholder statement 3 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_4, type: likert, text: "Placeholder statement 4 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_5, type: likert, text: "Placeholder statement 5 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_6, type: likert, text: "Placeholder statement 6 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_7, type: likert, text: "Placeholder statement 7 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_8, type: likert, text: "Placeholder statement 8 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_9, type: likert, text: "Placeholder statement 9 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_10, type: likert, text: "Placeholder statement 10 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_11, type: likert, text: "Placeholder statement 11 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_12, type: likert, text: "Placeholder statement 12 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_13, type: likert, text: "Placeholder statement 13 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+  - {id: nars_14, type: likert, text: "Placeholder statement 14 about robots; replace with the published item", points: 5, anchors: {low: Strongly disagree, high: Strongly agree}}
+# Scoring keys (never shown to a Model).
+keys:
+  nars_1: {construct: nars, subscale: s2, reversed: false}
+  nars_2: {construct: nars, subscale: s2, reversed: false}
+  nars_3: {construct: nars, subscale: s3, reversed: true}
+  nars_4: {construct: nars, subscale: s1, reversed: false}
+  nars_5: {construct: nars, subscale: s3, reversed: true}
+  nars_6: {construct: nars, subscale: s3, reversed: true}
+  nars_7: {construct: nars, subscale: s1, reversed: false}
+  nars_8: {construct: nars, subscale: s1, reversed: false}
+  nars_9: {construct: nars, subscale: s1, reversed: false}
+  nars_10: {construct: nars, subscale: s1, reversed: false}
+  nars_11: {construct: nars, subscale: s2, reversed: false}
+  nars_12: {construct: nars, subscale: s1, reversed: false}
+  nars_13: {construct: nars, subscale: s2, reversed: false}
+  nars_14: {construct: nars, subscale: s2, reversed: false}

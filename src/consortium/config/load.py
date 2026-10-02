@@ -21,6 +21,8 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from consortium.config.models import (
+    NARS_CONSTRUCT,
+    NARS_SUBSCALES,
     CardWording,
     InstrumentDef,
     PricesConfig,
@@ -40,6 +42,7 @@ _TEMPLATES_PACKAGE = "consortium.templates"
 CARD_WORDING_FILE = "persona_card/wording.yaml"
 PERSONAS_DIR = "panel/personas"
 PERSONAS_INDEX = f"{PERSONAS_DIR}/index.json"
+FIDELITY_BFI = "fidelity_bfi10"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 
 # --------------------------------------------------------------------------- YAML reading
@@ -267,6 +270,8 @@ def load_test(
                 "unknown_instrument", f"instruments.{i}: {name!r} not found", path=rel
             )
         if name not in cfg.instruments:
+            if _is_self_report(study, name):
+                raise _not_allowed(rel, i, name)
             raise ConsortiumError(
                 "unknown_instrument",
                 f"instruments.{i}: {name!r} is not enabled in {STUDY_FILE} instruments",
@@ -281,6 +286,9 @@ def load_test(
         name: _load_instrument(study, name, rel, f"instruments.{i}")
         for i, name in enumerate(test.instruments)
     }
+    for i, (name, instrument) in enumerate(instruments.items()):
+        if instrument.self_report:
+            raise _not_allowed(rel, i, name)
     for i, example in enumerate(test.practice):
         where = f"practice.{i}"
         instrument = instruments.get(example.instrument)
@@ -303,6 +311,81 @@ def load_test(
         if instrument.draft:
             log.warning("draft_instrument: %s", name)
     return test
+
+
+def _is_self_report(study: Path, name: str) -> bool:
+    try:
+        return _load_instrument(study, name).self_report
+    except ConsortiumError:
+        return False
+
+
+def _not_allowed(rel: str, i: int, name: str) -> ConsortiumError:
+    return ConsortiumError(
+        "instrument_not_allowed",
+        f"instruments.{i}: {name!r} is a self-report screening Instrument; it is used only "
+        "by consortium screen personas",
+        path=rel,
+    )
+
+
+def load_fidelity_instruments(study_dir: Path | str, cfg: StudyConfig) -> list[InstrumentDef]:
+    """The Persona-fidelity Instruments (story 3.1): BFI-10, then the NARS Instrument
+    selected by ``screening.nars_instrument`` when the frame has NARS bands.
+
+    Resolved like any Instrument (user folder first, then built-in), but not gated by
+    ``study.yaml`` ``instruments``. The NARS Instrument must be ``self_report`` with every
+    key of construct ``nars`` and at least one of the subscales s1, s2, s3 keyed
+    (``config_invalid``, field ``screening.nars_instrument``; ``unknown_instrument`` when
+    it does not resolve). Logs ``draft_instrument: <name>`` for a draft one.
+    """
+    study = Path(study_dir)
+    _check_no_shadowing(study)
+    out = [_load_instrument(study, FIDELITY_BFI)]
+    if cfg.personas.nars_bands:
+        name = cfg.screening.nars_instrument
+        field = "screening.nars_instrument"
+        if not _resolvable(study, name):
+            raise ConsortiumError(
+                "unknown_instrument", f"{field}: {name!r} not found", path=STUDY_FILE
+            )
+        try:
+            nars = _load_instrument(study, name, STUDY_FILE, field)
+        except ConsortiumError as err:
+            if err.code != "config_invalid":
+                raise
+            raise _invalid(STUDY_FILE, f"{field}: {name!r} ({err.path}): {err.message}") from err
+        problem = _nars_problem(nars)
+        if problem:
+            raise _invalid(STUDY_FILE, f"{field}: {name!r} {problem}")
+        shared = sorted({i.id for i in nars.items} & {i.id for i in out[0].items})
+        if shared:
+            raise _invalid(
+                STUDY_FILE,
+                f"{field}: {name!r} reuses item id(s) of {FIDELITY_BFI}: {', '.join(shared)}",
+            )
+        out.append(nars)
+    for instrument in out:
+        if not instrument.self_report:  # a built-in edited into an invalid state
+            raise _invalid(STUDY_FILE, f"{instrument.name!r} is not a self_report Instrument")
+        if instrument.draft:
+            log.warning("draft_instrument: %s", instrument.name)
+    return out
+
+
+def _nars_problem(instrument: InstrumentDef) -> str | None:
+    if not instrument.self_report:
+        return "must be a self_report Instrument"
+    keys = instrument.keys or {}
+    for item in instrument.items:
+        key = keys.get(item.id)
+        if key is None:
+            return f"item {item.id} has no key"
+        if key.construct != NARS_CONSTRUCT:
+            return f"keys.{item.id}: construct must be nars, not {key.construct}"
+    if not any(k.subscale in NARS_SUBSCALES for k in keys.values()):
+        return "must key at least one of the subscales s1, s2, s3"
+    return None
 
 
 def peek_test(path: Path | str) -> dict[str, Any]:
@@ -382,6 +465,15 @@ def card_wording_sha256() -> str:
     return hashlib.sha256(_card_wording_bytes()).hexdigest()
 
 
+def read_card(study_dir: Path | str, persona_id: str) -> str:
+    """The stored card text of ``persona_id`` exactly as written (``panel_invalid``)."""
+    rel = f"{PERSONAS_DIR}/{persona_id}.md"
+    try:
+        return (Path(study_dir) / rel).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        raise ConsortiumError("panel_invalid", f"cannot read {rel}: {err}", path=rel) from err
+
+
 def load_personas(study_dir: Path | str) -> list[Persona]:
     """The generated Persona pool from ``panel/personas/index.json``, in Persona order.
 
@@ -407,6 +499,8 @@ def load_personas(study_dir: Path | str) -> list[Persona]:
         ids = [p.id for p in personas]
         if ids != [f"p{i}" for i in range(1, len(ids) + 1)]:
             raise ValueError("Persona ids must be p1 ... pN, unique and in order")
+        if len({p.nars is None for p in personas}) > 1:
+            raise ValueError("nars must be null for every Persona or for none")
     except ValueError as err:  # includes ValidationError and UnicodeDecodeError
         raise ConsortiumError(
             "panel_invalid", f"{PERSONAS_INDEX}: {err}", path=PERSONAS_INDEX
