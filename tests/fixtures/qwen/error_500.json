@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 500,
+    "body": {
+      "error": {
+        "code": "internal_error",
+        "param": null,
+        "message": "An internal error has occured, please try again later.",
+        "type": "internal_error"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

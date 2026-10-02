@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "data_inspection_failed",
+        "param": null,
+        "message": "Input data may contain inappropriate content.",
+        "type": "data_inspection_failed"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

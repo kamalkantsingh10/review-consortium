@@ -205,6 +205,20 @@
           "description": "Env var holding the API key (default GEMINI_API_KEY for gemini, DASHSCOPE_API_KEY for qwen); never put the key itself in a Study file.",
           "title": "Api Key Env"
         },
+        "base_url": {
+          "anyOf": [
+            {
+              "pattern": "^https?://[^\\s/?#]+[^\\s]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OpenAI-compatible endpoint (an http(s) URL); qwen only, and required for qwen (no default: the Model Studio endpoint is workspace-specific).",
+          "title": "Base Url"
+        },
         "fps": {
           "anyOf": [
             {
@@ -236,6 +250,20 @@
           "default": null,
           "description": "Media resolution per frame; gemini only.",
           "title": "Media Resolution"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "pattern": "\\S",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sent verbatim as reasoning_effort (and archived) only when set; qwen only.",
+          "title": "Reasoning Effort"
         },
         "seed_supported": {
           "default": true,

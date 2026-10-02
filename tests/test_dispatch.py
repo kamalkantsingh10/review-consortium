@@ -296,16 +296,21 @@ def test_main_refused(study: Path) -> None:
     _nothing_written(study)
 
 
-def test_other_provider_unavailable(study: Path) -> None:
+def test_qwen_without_key_is_api_key_missing(
+    study: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     cfg = study / "study.yaml"
     doc = yaml.safe_load(cfg.read_text())
     model = doc["models"][0]
     del model["fake"]
-    model["provider"] = "qwen"  # no adapter until story 2.3
+    model["provider"] = "qwen"  # an adapter since story 2.3
+    model["settings"]["base_url"] = "https://ws-1.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+    model["limits"]["max_bytes"] = 9_900_000  # hosted qwen: base64 under 10 MB
     cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
     result = _cli("pilot1", "--yes", "--ceiling", "5", "--study", str(study))
     assert result.exit_code == 1
-    assert result.stderr.startswith("provider_unavailable:")
+    assert result.stderr.startswith("api_key_missing: m1: set DASHSCOPE_API_KEY")
     _nothing_written(study)
     assert not (study / LOCK_FILE).exists()
 

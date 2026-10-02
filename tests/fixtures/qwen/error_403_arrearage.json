@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 403,
+    "body": {
+      "error": {
+        "code": "Arrearage",
+        "param": null,
+        "message": "Access denied, please make sure your account is in good standing.",
+        "type": "Arrearage"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

@@ -789,3 +789,111 @@ def test_gemini_setting_values_checked(study: Path, setting: str) -> None:
     with pytest.raises(ConsortiumError) as info:
         load_study(study)
     assert info.value.code == "config_invalid"
+
+
+# --------------------------------------------------------------------------- story 2.3 settings
+
+QWEN_URL = "https://ws-1.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+
+
+def _as_provider(study: Path, provider: str, *settings: str) -> None:
+    text = (study / "study.yaml").read_text()
+    text = text.replace("provider: fake ", f"provider: {provider} ", 1)
+    if provider == "qwen":  # within hosted qwen's 10 MB base64 limit
+        text = text.replace("      max_bytes: 20000000\n", "      max_bytes: 9000000\n", 1)
+    text = text[: text.index("    fake:")] + text[text.index("# Canonical media"):]
+    extra = "".join(f"      {s}\n" for s in settings)
+    text = text.replace("      temperature: 0.7      # > 0\n",
+                        f"      temperature: 0.7      # > 0\n{extra}", 1)
+    (study / "study.yaml").write_text(text)
+
+
+def test_qwen_settings_load(study: Path) -> None:
+    original = (study / "study.yaml").read_text()
+    _as_provider(study, "qwen", f"base_url: {QWEN_URL}", "reasoning_effort: low")
+    model = load_study(study).models[0]
+    assert (model.settings.base_url, model.settings.reasoning_effort) == (QWEN_URL, "low")
+    assert model.api_key_env_name == "DASHSCOPE_API_KEY"
+    (study / "study.yaml").write_text(original)
+    _as_provider(study, "qwen", "base_url: http://gpu:8000/v1")
+    model = load_study(study).models[0]
+    assert (model.settings.base_url, model.settings.reasoning_effort) == (
+        "http://gpu:8000/v1", None)
+
+
+def test_qwen_needs_base_url(study: Path) -> None:
+    _as_provider(study, "qwen")
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid"
+    assert "base_url: required for provider: qwen" in info.value.message
+
+
+@pytest.mark.parametrize("provider", ["gemini", "fake"])
+@pytest.mark.parametrize("setting", [f"base_url: {QWEN_URL}", "reasoning_effort: low"])
+def test_qwen_settings_on_other_providers_are_config_invalid(
+    study: Path, provider: str, setting: str
+) -> None:
+    if provider == "fake":
+        _edit(study / "study.yaml", "      temperature: 0.7      # > 0\n",
+              f"      temperature: 0.7      # > 0\n      {setting}\n")
+    else:
+        _as_provider(study, provider, setting)
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid"
+    assert setting.split(":")[0] in info.value.message
+
+
+@pytest.mark.parametrize("setting", ["base_url: ftp://x/v1", "base_url: gpu:8000/v1",
+                                     "base_url: 'https://'", "base_url: 'http://a b/v1'",
+                                     "base_url: 3", "reasoning_effort: ''",
+                                     "reasoning_effort: '  '", "reasoning_effort: 1",
+                                     "fps: 1", "media_resolution: low", "thinking_level: low"])
+def test_qwen_setting_values_checked(study: Path, setting: str) -> None:
+    extra = [] if setting.startswith("base_url") else [f"base_url: {QWEN_URL}"]
+    _as_provider(study, "qwen", *extra, setting)
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid"
+
+
+@pytest.mark.parametrize("limits, ok", [
+    ("max_bytes: 9900000", True),
+    ("max_bytes: 9900001", False),
+    ("max_bytes: 20000000", False),
+])
+def test_hosted_qwen_max_bytes(study: Path, limits: str, ok: bool) -> None:
+    _as_provider(study, "qwen", f"base_url: {QWEN_URL}")
+    _edit(study / "study.yaml", "      max_bytes: 9000000\n", f"      {limits}\n")
+    if ok:
+        assert load_study(study).models[0].limits.max_bytes == 9_900_000
+        return
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid" and "10 MB" in info.value.message
+
+
+def test_hosted_qwen_needs_inline_base64(study: Path) -> None:
+    _as_provider(study, "qwen", f"base_url: {QWEN_URL}")
+    text = (study / "study.yaml").read_text()
+    (study / "study.yaml").write_text(text.replace("inline_base64: true", "inline_base64: false",
+                                                   1))
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid" and "10 MB" in info.value.message
+
+
+def test_self_hosted_qwen_has_no_size_rule(study: Path) -> None:
+    _as_provider(study, "qwen", "base_url: http://gpu:8000/v1")
+    _edit(study / "study.yaml", "      max_bytes: 9000000\n", "      max_bytes: 20000000\n")
+    assert load_study(study).models[0].limits.max_bytes == 20_000_000
+
+
+@pytest.mark.parametrize("url", ["http://gpu:99999/v1", "http://gpu:port/v1", "https://:8000/v1",
+                                 "https://./v1"])
+def test_qwen_base_url_needs_valid_host_and_port(study: Path, url: str) -> None:
+    _as_provider(study, "qwen", f"base_url: '{url}'")
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid" and "base_url" in info.value.message

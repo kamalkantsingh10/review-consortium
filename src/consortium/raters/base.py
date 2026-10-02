@@ -9,7 +9,8 @@ settings only and never change the request text.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import contextlib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, get_args
@@ -72,6 +73,7 @@ class ModelSpec:
 
     ``api_key`` comes from the Model's key env var and is never shown in a repr.
     ``clips_dir`` is the Study's ``clips/`` folder (``<clip_id>.mp4``).
+    ``base_url`` and ``reasoning_effort`` are qwen-only (story 2.3); None elsewhere.
     """
 
     model_id: str
@@ -85,6 +87,8 @@ class ModelSpec:
     api_key: str = field(repr=False)
     max_output_tokens: int
     clips_dir: Path
+    base_url: str | None = None
+    reasoning_effort: str | None = None
 
 
 class Rater(Protocol):
@@ -95,3 +99,16 @@ class Rater(Protocol):
     async def submit(self, calls: list[RaterCall]) -> list[Handle]: ...
 
     async def collect(self, handles: list[Handle]) -> list[RaterResult]: ...
+
+    async def aclose(self) -> None:
+        """Optional: release the Rater's client (``close_raters`` skips a Rater without it)."""
+
+
+async def close_raters(raters: Iterable[Any]) -> None:
+    """``aclose`` every Rater that has one; a failure to close is ignored (best effort)."""
+    for rater in raters:
+        close = getattr(rater, "aclose", None)
+        if close is None:
+            continue
+        with contextlib.suppress(Exception):  # closing never masks the Run's own outcome
+            await close()

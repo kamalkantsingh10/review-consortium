@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 429,
+    "body": {
+      "error": {
+        "code": "Throttling",
+        "param": null,
+        "message": "Requests throttling triggered.",
+        "type": "Throttling"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

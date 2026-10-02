@@ -2,7 +2,8 @@
 title: 'Story 2.3 — Qwen adapter (OpenAI-compatible)'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '90e16cbf9f337477fa06a023e8f18e2afa2aa08a'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -63,6 +64,14 @@ context:
 
 ## Code Map
 
+- **As built by Story 2.2 (commit after bb2c0d3); reuse these:**
+  - `core/prompt.compose` labels practice and target pairs alike and raises ValueError for >2 Clips or a pairwise Item without exactly 2 shared options. Adapters turn that ValueError into `adapter_error` before any call.
+  - The `documented` flag is defined in INTERFACE.md: true = documented as honoured, false = sent but not documented, null = not assessed.
+  - `submit` never raises for provider outcomes. Each call is independent. Keys are redacted on the full text before truncation.
+  - Timeouts and transport errors → transient; unknown or invalid responses → fatal.
+  - `stages/open.raters_for(cfg, model_ids, study)` strips the key, and `ModelSpec` hides the key from repr.
+  - `tests/recorded.py` holds the recorded-client pattern; there is a `live` marker.
+  - `httpx` is a direct dependency.
 - `src/consortium/raters/gemini.py`, `tests/recorded.py` (2.2) -- Patterns to mirror: the handle carries the outcome, injected client, redaction.
 - `src/consortium/core/prompt.py` (2.2) -- `compose`, `PROMPT_FORMAT`.
 - `src/consortium/core/media_limits.py` -- The base64 byte check, already enforced by `push test`.
@@ -72,14 +81,14 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pyproject.toml` -- Add `openai>=3.23,<3.24`.
-- [ ] `src/consortium/raters/qwen.py` -- `QwenRater(spec, client=None)` and the `DOCUMENTED` table (with a doc URL and date).
-- [ ] `src/consortium/raters/base.py`, `src/consortium/config/models.py`, `docs/schema/` -- `base_url` and `reasoning_effort` plus their qwen-only validators. Regenerate the schemas.
-- [ ] `src/consortium/stages/open.py` -- Qwen branch.
-- [ ] `docs/INTERFACE.md` -- `base_url` (a workspace URL example and a vLLM example), `limits.max_bytes` ≤ 10000000 for hosted qwen, `reasoning_effort`, the `documented` semantics (`null` off Model Studio), the usage keys, the pricing note.
-- [ ] `tests/recorded.py`, `tests/fixtures/qwen/*.json` -- A recorded `chat.completions.create` async stream double that can raise SDK errors mid-stream.
-- [ ] `tests/test_qwen.py` -- Every matrix row. The sent content equals `compose` mapped one-to-one, and is identical in text to Gemini's for the same request. `seed` is omitted when `seed_supported: false`; `reasoning_effort` is sent and archived only when set. The key is absent from `raw` and the handle.
-- [ ] `tests/test_live_qwen.py` -- `@pytest.mark.live`, skipped unless `DASHSCOPE_API_KEY` and `DASHSCOPE_BASE_URL` are set. Runs one Trial on a 2 s ffmpeg Clip to a terminal state.
+- [x] `pyproject.toml` -- Add `openai>=3.23,<3.24`.
+- [x] `src/consortium/raters/qwen.py` -- `QwenRater(spec, client=None)` and the `DOCUMENTED` table (with a doc URL and date).
+- [x] `src/consortium/raters/base.py`, `src/consortium/config/models.py`, `docs/schema/` -- `base_url` and `reasoning_effort` plus their qwen-only validators. Regenerate the schemas.
+- [x] `src/consortium/stages/open.py` -- Qwen branch.
+- [x] `docs/INTERFACE.md` -- `base_url` (a workspace URL example and a vLLM example), `limits.max_bytes` ≤ 10000000 for hosted qwen, `reasoning_effort`, the `documented` semantics (`null` off Model Studio), the usage keys, the pricing note.
+- [x] `tests/recorded.py`, `tests/fixtures/qwen/*.json` -- A recorded `chat.completions.create` async stream double that can raise SDK errors mid-stream.
+- [x] `tests/test_qwen.py` -- Every matrix row. The sent content equals `compose` mapped one-to-one, and is identical in text to Gemini's for the same request. `seed` is omitted when `seed_supported: false`; `reasoning_effort` is sent and archived only when set. The key is absent from `raw` and the handle.
+- [x] `tests/test_live_qwen.py` -- `@pytest.mark.live`, skipped unless `DASHSCOPE_API_KEY` and `DASHSCOPE_BASE_URL` are set. Runs one Trial on a 2 s ffmpeg Clip to a terminal state.
 
 **Acceptance Criteria:**
 - Given a Study with a gemini and a qwen Model, when a Test runs on recorded clients, then both adapters receive identical text parts and every qwen response line holds `settings` with `temperature.documented == false`.
@@ -90,6 +99,21 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | VG, EC, BH | Malformed or non-JSON stream data escapes submit (the real SDK doesn't validate); the test double is stricter than the SDK; one failure can lose other handles | high | patch |
+| 2 | EC | No finish_reason → archived ok; unknown finish reasons ok; multi-choice interleave | medium | patch |
+| 3 | BH, EC, VG | Hand-listed error-code spellings miss CamelCase/dotted variants (transient → fatal, refusal → fatal) | medium | patch (normalise + prefixes) |
+| 4 | BH, VG | httpx2 imported but undeclared | low | patch (catch openai errors) |
+| 5 | BH | No explicit timeout; client never closed | medium | patch |
+| 6 | BH | Data URI without a MIME type breaks vLLM; vLLM claim untested | medium | patch (host-dependent prefix, softened claim) |
+| 7 | BH, EC | stream_options not archived; prompt_format flagged documented; bool usage; trailing-dot host | low | patch |
+| 8 | BH, EC | Hosted 10 MB limit unenforced; base_url validation loose | medium | patch (config_invalid) |
+| 9 | BH | provider_unavailable path now untested | low | patch (unit test) |
+| 10 | BH | Live test docstring / host check | low | patch |
+| 11 | VG | Mid-stream throttling, limit, quota and empty content_filter untested | medium | patch (tests) |
+| 12 | BH | Base64 refs held in memory for every prepared Clip | low | Rejected: ~13 MB per Clip, bounded by the Test's Clips; fine at study scale |
 
 ## Design Notes
 

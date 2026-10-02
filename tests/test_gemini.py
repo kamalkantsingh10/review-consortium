@@ -556,3 +556,26 @@ def test_unprepared_media_is_adapter_error_before_any_call(tmp_path: Path) -> No
         run(go())
     assert info.value.code == "adapter_error"
     assert client.ops("generate_content") == []
+
+
+def test_aclose_closes_only_a_built_client(tmp_path: Path) -> None:
+    closed: list[bool] = []
+    r = GeminiRater(spec(tmp_path))
+
+    async def go():
+        client = r.client  # built lazily by the Rater
+
+        async def aclose() -> None:
+            closed.append(True)
+
+        client.aio.aclose = aclose
+        await r.aclose()
+        await r.aclose()  # idempotent
+        return list(closed)  # before the SDK's own __del__ may schedule another aclose
+
+    assert run(go()) == [True] and r._client is None
+    closed.clear()
+    injected = RecordedGeminiClient()
+    injected.aio.aclose = lambda: closed.append(False)  # must not be called
+    run(GeminiRater(spec(tmp_path), client=injected).aclose())
+    assert False not in closed

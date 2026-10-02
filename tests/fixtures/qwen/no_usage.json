@@ -1,0 +1,52 @@
+{
+  "chunks": [
+    {
+      "id": "chatcmpl-rec",
+      "object": "chat.completion.chunk",
+      "created": 1790000000,
+      "model": "qwen3.8-omni-flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant",
+            "content": "{\"alive\""
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-rec",
+      "object": "chat.completion.chunk",
+      "created": 1790000000,
+      "model": "qwen3.8-omni-flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant",
+            "content": ":\"B\"}"
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "id": "chatcmpl-rec",
+      "object": "chat.completion.chunk",
+      "created": 1790000000,
+      "model": "qwen3.8-omni-flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "delta": {},
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ]
+}

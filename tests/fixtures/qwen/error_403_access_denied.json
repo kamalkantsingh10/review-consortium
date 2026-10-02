@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 403,
+    "body": {
+      "error": {
+        "code": "access_denied",
+        "param": null,
+        "message": "Access denied.",
+        "type": "access_denied"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

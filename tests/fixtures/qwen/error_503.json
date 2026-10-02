@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 503,
+    "body": {
+      "error": {
+        "code": "ServiceUnavailable",
+        "param": null,
+        "message": "The service is temporarily unavailable.",
+        "type": "ServiceUnavailable"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

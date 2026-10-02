@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 401,
+    "body": {
+      "error": {
+        "code": "invalid_api_key",
+        "param": null,
+        "message": "Incorrect API key provided.",
+        "type": "invalid_request_error"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

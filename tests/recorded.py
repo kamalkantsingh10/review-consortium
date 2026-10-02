@@ -1,5 +1,7 @@
 """Recorded-response doubles for the real adapters (no network).
 
+``RecordedQwenClient`` (story 2.3, below) stands in for ``openai.AsyncOpenAI``.
+
 ``RecordedGeminiClient`` stands in for ``genai.Client``: ``aio.files``
 (``get``/``upload``/``delete``) keeps an in-memory File store, and
 ``aio.models.generate_content`` replays a queue of recorded outcomes: a
@@ -22,7 +24,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import openai
 from google.genai import errors, types
+from openai._base_client import httpx2 as _sdk_http  # the SDK's HTTP types, via the SDK
+from openai._models import construct_type
+from openai.types.chat import ChatCompletionChunk
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
@@ -145,3 +151,117 @@ class RecordedGeminiClient:
 
     def ops(self, op: str) -> list[dict[str, Any]]:
         return [kw for o, kw in self.calls if o == op]
+
+
+# --------------------------------------------------------------------------- qwen (story 2.3)
+
+QWEN_URL = "https://ws-test.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+
+
+def _qwen_request(base_url: str = QWEN_URL) -> _sdk_http.Request:
+    return _sdk_http.Request("POST", f"{base_url}/chat/completions")
+
+
+def qwen_status_error(status: int, body: Any) -> openai.APIStatusError:
+    """The SDK's own status error for an HTTP ``status`` with JSON ``body`` (the
+    exception class and ``code`` come from the SDK's mapping, as on the wire)."""
+    response = _sdk_http.Response(status, json=body, request=_qwen_request())
+    sdk = openai.AsyncOpenAI(api_key="recorded", base_url=QWEN_URL, max_retries=0)
+    return sdk._make_status_error_from_response(response)
+
+
+def _qwen_raise(item: Any) -> None:
+    if isinstance(item, BaseException):
+        raise item
+    if not isinstance(item, dict):
+        return
+    if "status_error" in item:
+        e = item["status_error"]
+        raise qwen_status_error(e["status"], e["body"])
+    if "stream_error" in item:  # how the SDK raises an ``{"error": ...}`` event mid-stream
+        raise openai.APIError(item["stream_error"].get("message", "stream error"),
+                              _qwen_request(), body=item["stream_error"])
+    if "transport_error" in item:  # the SDK wraps a transport error as APIConnectionError
+        raise openai.APIConnectionError(message=item["transport_error"],
+                                        request=_qwen_request())
+    if "bad_sse" in item:  # a non-JSON SSE data line: the SDK's json.loads fails
+        json.loads(item["bad_sse"])
+    if "connection_error" in item:
+        raise openai.APIConnectionError(message=item["connection_error"],
+                                        request=_qwen_request())
+    if "timeout" in item:
+        raise openai.APITimeoutError(_qwen_request())
+
+
+class _QwenStream:
+    """An async stream of ``ChatCompletionChunk`` built as the SDK builds them
+    (``construct_type``: no validation); a non-chunk entry raises mid-stream."""
+
+    def __init__(self, entries: list[Any]) -> None:
+        self.entries = list(entries)
+
+    def __aiter__(self) -> _QwenStream:
+        return self
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        if not self.entries:
+            raise StopAsyncIteration
+        entry = self.entries.pop(0)
+        if isinstance(entry, dict) and not ({"stream_error", "transport_error", "bad_sse"}
+                                            & entry.keys()):
+            return construct_type(type_=ChatCompletionChunk, value=entry)
+        _qwen_raise(entry)
+        raise AssertionError(f"unknown recorded stream entry {entry!r}")
+
+
+class _QwenCompletions:
+    def __init__(self, owner: RecordedQwenClient) -> None:
+        self.o = owner
+
+    async def create(self, **kwargs: Any) -> _QwenStream:
+        self.o.calls.append(("chat.completions.create", kwargs))
+        if self.o.responses:
+            item = self.o.responses.pop(0)
+        elif self.o.responder is not None:
+            item = self.o.responder(kwargs)
+        else:
+            raise AssertionError("no recorded response left")
+        _qwen_raise(item)  # an error before the stream starts
+        return _QwenStream(item["chunks"])
+
+
+class RecordedQwenClient:
+    """Stands in for ``openai.AsyncOpenAI``: ``chat.completions.create(**kwargs)``
+    replays a queue of recorded outcomes. Each is ``{"chunks": [...]}`` (an async
+    stream of ``ChatCompletionChunk`` JSON objects, in which a ``{"stream_error":
+    {code, message}}``, ``{"transport_error": msg}`` (an ``APIConnectionError``) or
+    ``{"bad_sse": text}`` (a ``JSONDecodeError``) entry raises mid-stream as the SDK
+    would), or an error raised by ``create``: ``{"status_error": {status,
+    body}}`` (the SDK's status error for that HTTP response), ``{"connection_error":
+    msg}``, ``{"timeout": true}``, or an exception. Once the queue is empty, an
+    optional ``responder(kwargs)`` builds the outcome. Calls are logged in ``calls``.
+    """
+
+    def __init__(self, responses: list[Any] | None = None, *,
+                 responder: Callable[[dict[str, Any]], Any] | None = None) -> None:
+        self.responses = list(responses or [])
+        self.responder = responder
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.chat = SimpleNamespace(completions=_QwenCompletions(self))
+
+    def ops(self, op: str = "chat.completions.create") -> list[dict[str, Any]]:
+        return [kw for o, kw in self.calls if o == op]
+
+
+def qwen_chunks(text: str, *, finish: str = "stop", usage: dict[str, Any] | None = None,
+                fingerprint: str | None = None, model: str = "qwen3.8-omni-flash") -> dict:
+    """A recorded stream answering ``text`` (one delta per 8 characters)."""
+    base = {"id": "chatcmpl-rec", "object": "chat.completion.chunk", "created": 1790000000,
+            "model": model, "system_fingerprint": fingerprint}
+    pieces = [text[i:i + 8] for i in range(0, len(text), 8)] or [""]
+    chunks = [base | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": p},
+                                   "finish_reason": None}]} for p in pieces]
+    chunks.append(base | {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+    if usage is not None:
+        chunks.append(base | {"choices": [], "usage": usage})
+    return {"chunks": chunks}

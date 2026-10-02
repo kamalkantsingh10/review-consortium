@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": "model_not_found",
+        "param": null,
+        "message": "The model `qwen-nope` does not exist.",
+        "type": "invalid_request_error"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

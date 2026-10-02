@@ -173,6 +173,7 @@ class GeminiRater:
     ) -> None:
         self.spec = spec
         self._client = client
+        self._owns_client = client is None
         self._now = now or (lambda: datetime.now(UTC))
         self._sleep = sleep or asyncio.sleep
         self._expiry: dict[str, datetime] = {}  # clip_id -> effective expiration
@@ -189,6 +190,12 @@ class GeminiRater:
                 api_key=self.spec.api_key, http_options=_http_options(FILE_TIMEOUT_S)
             )
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the client this Rater built (an injected client is left alone)."""
+        if self._owns_client and self._client is not None:
+            client, self._client = self._client, None
+            await client.aio.aclose()
 
     def _redact(self, text: str) -> str:
         key = self.spec.api_key

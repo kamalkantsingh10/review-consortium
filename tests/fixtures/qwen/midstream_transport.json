@@ -1,0 +1,24 @@
+{
+  "chunks": [
+    {
+      "id": "chatcmpl-rec",
+      "object": "chat.completion.chunk",
+      "created": 1790000000,
+      "model": "qwen3.8-omni-flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant",
+            "content": "{\"alive\""
+          },
+          "finish_reason": null
+        }
+      ]
+    },
+    {
+      "transport_error": "connection reset mid-stream"
+    }
+  ]
+}

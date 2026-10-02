@@ -129,6 +129,9 @@ def fake_answer(request: TrialRequest, seed: int) -> str:
 class FakeRater:
     provider = "fake"
 
+    async def aclose(self) -> None:
+        """Nothing to release."""
+
     def __init__(
         self,
         input_tokens: int = 0,

@@ -1,0 +1,15 @@
+{
+  "status_error": {
+    "status": 429,
+    "body": {
+      "error": {
+        "code": "limit_requests",
+        "param": null,
+        "message": "You exceeded your current requests list.",
+        "type": "limit_requests"
+      },
+      "id": "chatcmpl-rec",
+      "request_id": "req-rec"
+    }
+  }
+}

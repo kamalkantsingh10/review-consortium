@@ -88,9 +88,10 @@ from consortium.core.render import TrialRequest, canonical_json, practice_for, r
 from consortium.core.seeds import derive_seed
 from consortium.core.test_checks import check_media_limits, check_plan
 from consortium.engine.dispatch import Budget, dispatch
-from consortium.raters.base import ModelSpec, Rater
+from consortium.raters.base import ModelSpec, Rater, close_raters
 from consortium.raters.fake import FakeRater
 from consortium.raters.gemini import GeminiRater
+from consortium.raters.qwen import QwenRater
 
 # The Study's Clip folder, as stages.push writes it (stages never import one another).
 CLIPS_DIR = "clips"
@@ -679,11 +680,14 @@ async def _dispatch_resume(
             )
         paused = None
         if pairs:
-            paused = await dispatch(
-                study, pairs, raters, writer=writer, seed=cfg.seed,
-                concurrency=cfg.concurrency, collect=collect, budget=budget,
-                max_retries=max_retries, retry=retry,
-            )
+            try:
+                paused = await dispatch(
+                    study, pairs, raters, writer=writer, seed=cfg.seed,
+                    concurrency=cfg.concurrency, collect=collect, budget=budget,
+                    max_retries=max_retries, retry=retry,
+                )
+            finally:
+                await close_raters(raters.values())
         if paused is None:  # the pause is cleared only once the resume did not pause again
             await writer.do("set_paused", lambda conn: set_paused(conn, test, None))
         states, committed = await writer.do(
@@ -696,10 +700,10 @@ def raters_for(cfg: StudyConfig, model_ids: list[str], study: Path) -> dict[str,
     """``model_id -> Rater``: the one place a provider is mapped to an adapter class.
 
     ``fake``: one ``FakeRater`` per Model, reporting that Model's ``fake`` usage and
-    simulating its ``fake`` rates. ``gemini``: a ``GeminiRater`` with a ``ModelSpec``
-    built from the config plus the key from the Model's key env var
-    (``api_key_missing`` when it is unset or empty). Building a Rater makes no
-    network call. ``qwen`` has no adapter yet (``provider_unavailable``).
+    simulating its ``fake`` rates. ``gemini`` / ``qwen``: a ``GeminiRater`` /
+    ``QwenRater`` with a ``ModelSpec`` built from the config plus the key from the
+    Model's key env var (``api_key_missing`` when it is unset or empty). Building a
+    Rater makes no network call.
     """
     out: dict[str, Rater] = {}
     for model_id in model_ids:
@@ -713,6 +717,8 @@ def raters_for(cfg: StudyConfig, model_ids: list[str], study: Path) -> dict[str,
             )
         elif model.provider == "gemini":
             out[model_id] = GeminiRater(_model_spec(model, study))
+        elif model.provider == "qwen":
+            out[model_id] = QwenRater(_model_spec(model, study))
         else:
             raise ConsortiumError(
                 "provider_unavailable",
@@ -732,7 +738,7 @@ def _model_spec(model: ModelConfig, study: Path) -> ModelSpec:
         temperature=s.temperature, fps=s.fps, seed_supported=s.seed_supported,
         media_resolution=s.media_resolution, thinking_level=s.thinking_level,
         api_key=api_key, max_output_tokens=model.max_output_tokens,
-        clips_dir=study / CLIPS_DIR,
+        clips_dir=study / CLIPS_DIR, base_url=s.base_url, reasoning_effort=s.reasoning_effort,
     )
 
 
@@ -858,10 +864,13 @@ async def _dispatch_all(
             await writer.do(
                 "set_ceiling", lambda conn: set_ceiling(conn, new_ceiling, plan.test, "run")
             )
-        paused = await dispatch(
-            study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency,
-            budget=budget, max_retries=max_retries, retry=cfg.session.retry,
-        )
+        try:
+            paused = await dispatch(
+                study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency,
+                budget=budget, max_retries=max_retries, retry=cfg.session.retry,
+            )
+        finally:
+            await close_raters(raters.values())
         states, committed = await writer.do(
             "state_counts", lambda conn: (state_counts(conn, plan.test), committed_usd(conn))
         )

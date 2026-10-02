@@ -26,12 +26,13 @@ from consortium.core.errors import ConsortiumError
 from consortium.core.render import canonical_json
 from consortium.raters.base import RaterCall
 from consortium.raters.gemini import GeminiRater, file_name
+from consortium.raters.qwen import QwenRater
 from consortium.stages import open as open_stage
 from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, plan_and_render
 from consortium.stages.push import push_test
-from recorded import RecordedGeminiClient
+from recorded import RecordedGeminiClient, RecordedQwenClient, qwen_chunks
 
 runner = CliRunner()
 
@@ -576,3 +577,146 @@ def test_fake_run_response_lines_have_no_settings(fresh: Path) -> None:
     open_test(fresh, "pilot1", dry_run=False, yes=True)
     lines = (fresh / "archive" / "responses.jsonl").read_text().splitlines()
     assert lines and all("settings" not in json.loads(line) for line in lines)
+
+
+# --------------------------------------------------------------------------- qwen (story 2.3)
+
+QWEN_URL = "https://ws-1.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+VLLM_URL = "http://gpu:8000/v1"
+
+
+def _add_qwen(study: Path, base_url: str = QWEN_URL, model_name: str = "qwen3.8-omni-flash",
+              **settings: Any) -> None:
+    """Adds Model ``m2`` (qwen) to a Study whose ``m1`` was made gemini by ``_to_gemini``."""
+    cfg = study / "study.yaml"
+    doc = yaml.safe_load(cfg.read_text())
+    doc["models"] = doc["models"][:1] + [{
+        "id": "m2", "provider": "qwen", "model": model_name,
+        "settings": {"temperature": 0.7, "base_url": base_url, **settings},
+        "max_output_tokens": 512,
+        "limits": {"max_seconds": 600, "max_bytes": 9_900_000, "inline_base64": True},
+    }]
+    cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
+    prices = yaml.safe_load((study / "prices.yaml").read_text())
+    prices["models"]["m2"] = {"input_usd_per_mtok": "0.40", "output_usd_per_mtok": "1.60",
+                              "media_tokens_per_s": "300", "chars_per_token": "4"}
+    (study / "prices.yaml").write_text(yaml.safe_dump(prices, sort_keys=False))
+
+
+def _qwen_answer(kwargs: dict[str, Any]) -> dict[str, Any]:
+    items_text = next(p["text"] for p in kwargs["messages"][0]["content"]
+                      if p["type"] == "text" and p["text"].startswith("Items: "))
+    answer = {item["id"]: 3 for item in json.loads(items_text[len("Items: "):])}
+    return qwen_chunks(json.dumps(answer), fingerprint="fp-1",
+                       usage={"prompt_tokens": 900, "completion_tokens": 40,
+                              "total_tokens": 940,
+                              "prompt_tokens_details": {"text_tokens": 300,
+                                                        "audio_tokens": 100,
+                                                        "video_tokens": 500}})
+
+
+def test_qwen_missing_key_and_custom_env(fresh: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    _to_gemini(fresh)
+    _add_qwen(fresh)
+    with pytest.raises(ConsortiumError) as info:
+        open_stage.raters_for(load_study(fresh), ["m1", "m2"], fresh)
+    assert (info.value.code, info.value.message) == ("api_key_missing",
+                                                     "m2: set DASHSCOPE_API_KEY")
+    monkeypatch.setenv("VLLM_TOKEN", "  local-token ")
+    _add_qwen(fresh, VLLM_URL, "Qwen/Qwen3-Omni-30B-A3B-Instruct", api_key_env="VLLM_TOKEN",
+              reasoning_effort="low", seed_supported=False)
+    raters = open_stage.raters_for(load_study(fresh), ["m1", "m2"], fresh)
+    assert isinstance(raters["m2"], QwenRater)
+    spec = raters["m2"].spec
+    assert (spec.api_key, spec.base_url, spec.model, spec.reasoning_effort, spec.seed_supported,
+            spec.clips_dir) == ("local-token", VLLM_URL, "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                                "low", False, fresh / "clips")
+    assert raters["m1"].spec.base_url is None and raters["m1"].spec.reasoning_effort is None
+
+
+def _two_model_run(study: Path, monkeypatch: pytest.MonkeyPatch, base_url: str,
+                   model_name: str) -> tuple[RecordedGeminiClient, RecordedQwenClient]:
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key-not-real")
+    gemini = RecordedGeminiClient(responder=_godspeed_answer)
+    qwen = RecordedQwenClient(responder=_qwen_answer)
+    _gemini_g1(study, monkeypatch, gemini)
+    _add_qwen(study, base_url, model_name)
+    monkeypatch.setattr(open_stage, "QwenRater", lambda spec: QwenRater(spec, client=qwen))
+    summary = open_test(study, "g1", dry_run=False, yes=True, ceiling="100")
+    assert summary.states == {"valid": 128}
+    return gemini, qwen
+
+
+def _qwen_lines(study: Path) -> list[dict[str, Any]]:
+    return [line for (trial_id, _), line in read_responses(study).items()
+            if "-m2/" in trial_id]
+
+
+def test_gemini_and_qwen_get_identical_text(fresh: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gemini, qwen = _two_model_run(fresh, monkeypatch, QWEN_URL, "qwen3.8-omni-flash")
+    gem_texts = sorted(tuple(p.text for p in kw["contents"][0].parts)
+                       for kw in gemini.ops("generate_content"))
+    qwen_texts = sorted(tuple(p.get("text") for p in kw["messages"][0]["content"])
+                        for kw in qwen.ops())
+    assert len(gem_texts) == len(qwen_texts) == 64
+    assert gem_texts == qwen_texts
+    lines = _qwen_lines(fresh)
+    assert len(lines) == 64
+    for line in lines:
+        assert line["settings"]["temperature"] == {"value": 0.7, "documented": False}
+        assert line["model_build"] == "fp-1"
+        assert line["usage"]["video_tokens"] == 500 and line["usage"]["input_tokens"] == 900
+    text = (fresh / "archive" / "responses.jsonl").read_text()
+    assert "dash-key-not-real" not in text and "base64" not in text
+
+
+def test_vllm_differs_only_in_null_flags(
+    fresh: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other"
+    shutil.copytree(fresh, other)
+    _, hosted = _two_model_run(fresh, monkeypatch, QWEN_URL, "qwen3.8-omni-flash")
+    _, local = _two_model_run(other, monkeypatch, VLLM_URL, "Qwen/Qwen3-Omni")
+    swap = {"model": "Qwen/Qwen3-Omni"}
+
+    def shape(client: RecordedQwenClient) -> list[str]:  # vLLM gets the media type in the URI
+        return sorted(json.dumps(kw | swap, sort_keys=True).replace(
+            "data:video/mp4;base64,", "data:;base64,") for kw in client.ops())
+
+    assert shape(hosted) == shape(local)
+    a = {k: v for k, v in read_responses(fresh).items() if "-m2/" in k[0]}
+    b = {k: v for k, v in read_responses(other).items() if "-m2/" in k[0]}
+    assert a.keys() == b.keys()
+    for key, line in a.items():
+        theirs = b[key]
+        assert all(v["documented"] is None for v in theirs["settings"].values())
+        assert {n: v["value"] for n, v in line["settings"].items()} | swap == {
+            n: v["value"] for n, v in theirs["settings"].items()}
+        for field in ("raw", "usage", "model_build", "category", "request_sha256"):
+            assert line[field] == theirs[field]
+
+
+def test_unknown_provider_is_provider_unavailable(tmp_path: Path) -> None:
+    cfg = SimpleNamespace(model_by_id=lambda model_id: SimpleNamespace(provider="other"))
+    with pytest.raises(ConsortiumError) as info:
+        open_stage.raters_for(cfg, ["m1"], tmp_path)  # type: ignore[arg-type]
+    assert info.value.code == "provider_unavailable"
+
+
+def test_raters_are_closed_after_dispatch(fresh: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[str] = []
+    real = open_stage.raters_for
+
+    def spy(cfg, model_ids, study):
+        raters = real(cfg, model_ids, study)
+        for model_id, rater in raters.items():
+            async def aclose(model_id: str = model_id) -> None:
+                closed.append(model_id)
+            rater.aclose = aclose
+        return raters
+
+    monkeypatch.setattr(open_stage, "raters_for", spy)
+    open_test(fresh, "pilot1", dry_run=False, yes=True)
+    assert closed == ["m1"]

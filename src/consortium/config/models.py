@@ -10,6 +10,7 @@ import re
 import string
 from decimal import Decimal
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -89,7 +90,23 @@ _PROVIDER_ONLY_SETTINGS = {
     "fps": "gemini",
     "media_resolution": "gemini",
     "thinking_level": "gemini",
+    "base_url": "qwen",
+    "reasoning_effort": "qwen",
 }
+_HTTP_URL_PATTERN = r"^https?://[^\s/?#]+[^\s]*$"
+# Hosted Model Studio (a ``base_url`` host ending in aliyuncs.com) takes a Clip only as a
+# base64 string under 10 MB; push test counts 4/3 of the file against limits.max_bytes.
+_MODEL_STUDIO_HOST = "aliyuncs.com"
+HOSTED_QWEN_MAX_BYTES = 9_900_000
+
+
+def _url_host(url: str) -> str:
+    return (urlparse(url).hostname or "").lower().rstrip(".")
+
+
+def is_model_studio_url(url: str | None) -> bool:
+    host = _url_host(url or "")
+    return host == _MODEL_STUDIO_HOST or host.endswith("." + _MODEL_STUDIO_HOST)
 _DEFAULT_KEY_ENV = {"gemini": "GEMINI_API_KEY", "qwen": "DASHSCOPE_API_KEY"}
 
 
@@ -107,11 +124,34 @@ class ModelSettings(_Strict):
     thinking_level: Literal["minimal", "low", "medium", "high"] | None = Field(
         default=None, description="Pinned thinking level; gemini only."
     )
+    base_url: Annotated[StrictStr, Field(pattern=_HTTP_URL_PATTERN)] | None = Field(
+        default=None,
+        description="OpenAI-compatible endpoint (an http(s) URL); qwen only, and required "
+        "for qwen (no default: the Model Studio endpoint is workspace-specific).",
+    )
+    reasoning_effort: Annotated[StrictStr, Field(pattern=r"\S")] | None = Field(
+        default=None,
+        description="Sent verbatim as reasoning_effort (and archived) only when set; qwen only.",
+    )
     api_key_env: Annotated[StrictStr, Field(pattern=_ENV_NAME_PATTERN)] | None = Field(
         default=None,
         description="Env var holding the API key (default GEMINI_API_KEY for gemini, "
         "DASHSCOPE_API_KEY for qwen); never put the key itself in a Study file.",
     )
+
+    @field_validator("base_url")
+    @classmethod
+    def _valid_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            parsed = urlparse(value)
+            parsed.port  # noqa: B018 - raises ValueError for a bad port
+        except ValueError as err:
+            raise ValueError(f"not a valid URL: {err}") from None
+        if not _url_host(value):
+            raise ValueError("needs a host name")
+        return value
 
 
 class MediaLimits(_Strict):
@@ -173,6 +213,16 @@ class ModelConfig(_Strict):
         for name, provider in _PROVIDER_ONLY_SETTINGS.items():
             if getattr(self.settings, name) is not None and self.provider != provider:
                 raise ValueError(f"settings.{name}: only allowed for provider: {provider}")
+        if self.provider == "qwen" and self.settings.base_url is None:
+            raise ValueError("settings.base_url: required for provider: qwen")
+        if self.provider == "qwen" and is_model_studio_url(self.settings.base_url) and (
+            self.limits.max_bytes > HOSTED_QWEN_MAX_BYTES or not self.limits.inline_base64
+        ):
+            raise ValueError(
+                f"limits: hosted qwen (Model Studio) takes a Clip only inline as a base64 "
+                f"string under 10 MB: set max_bytes <= {HOSTED_QWEN_MAX_BYTES} and "
+                "inline_base64: true"
+            )
         if self.provider == "fake":
             for name in ("api_key_env", "seed_supported"):
                 if name in self.settings.model_fields_set:
