@@ -8,7 +8,6 @@ leaves no partial Panel.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import logging
@@ -18,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from consortium.board.db import DB_FILE, read_only
+from consortium.board.screening import any_results
 from consortium.board.trials import any_panel_trials
 from consortium.config.load import (
     PERSONAS_DIR,
@@ -26,6 +26,15 @@ from consortium.config.load import (
     load_study,
 )
 from consortium.config.models import StudyConfig
+from consortium.config.panel_files import (
+    INDEX_FILE,
+    META_FILE,
+    exists,
+    fsync_dir,
+    move_into_place,
+    sweep_stale,
+    write_file,
+)
 from consortium.core.errors import ConsortiumError
 from consortium.core.perception import NEUTRAL_PERSONA_ID
 from consortium.core.personas import (
@@ -38,59 +47,12 @@ from consortium.core.personas import (
 
 log = logging.getLogger(__name__)
 
-INDEX_FILE = "index.json"
-META_FILE = "meta.json"
-
-
 def canonical_index(personas: list[Persona]) -> bytes:
     """Canonical JSON (sorted keys, UTF-8, no whitespace) of the Persona list."""
     data = [p.model_dump(mode="json") for p in personas]
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
         "utf-8"
     )
-
-
-def _write(path: Path, data: bytes) -> None:
-    with path.open("wb") as fh:
-        fh.write(data)
-        fh.flush()
-        os.fsync(fh.fileno())
-
-
-def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
-def _exists(target: Path) -> bool:
-    if target.is_dir():
-        return any(target.iterdir())
-    return target.exists() or target.is_symlink()
-
-
-def _sweep_stale(target: Path) -> None:
-    """Remove ``.personas-*`` work folders left behind by a crashed run.
-
-    ``.personas-old-*`` copies are kept while ``panel/personas`` is absent: one may
-    hold the only copy of a Panel whose restore failed.
-    """
-    panel = target.parent
-    if not panel.is_dir():
-        return
-    keep_old = not (target.exists() or target.is_symlink())
-    for entry in panel.glob(".personas-*"):
-        if keep_old and entry.name.startswith(".personas-old-"):
-            continue
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry, ignore_errors=True)
 
 
 def _meta(cfg: StudyConfig) -> bytes:
@@ -124,8 +86,8 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
     target = study_dir / PERSONAS_DIR
     panel = target.parent
     _refuse_if_in_use(study_dir)
-    _sweep_stale(target)
-    if _exists(target) and not force:
+    sweep_stale(target)
+    if exists(target) and not force:
         raise _panel_exists()
 
     personas = generate_personas(cfg)
@@ -136,11 +98,11 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
         tmp = Path(tempfile.mkdtemp(prefix=".personas-new-", dir=panel))
         try:
             for name, data in cards.items():
-                _write(tmp / name, data)
-            _write(tmp / INDEX_FILE, canonical_index(personas))
-            _write(tmp / META_FILE, meta)
+                write_file(tmp / name, data)
+            write_file(tmp / INDEX_FILE, canonical_index(personas))
+            write_file(tmp / META_FILE, meta)
             os.chmod(tmp, 0o755)
-            _fsync_dir(tmp)
+            fsync_dir(tmp)
             _refuse_if_in_use(study_dir)  # an ``open`` may have planned Trials meanwhile
             if force:
                 _swap_into_place(tmp, target, study_dir)
@@ -149,7 +111,7 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
-        _fsync_dir(panel)
+        fsync_dir(panel)
     except OSError as err:
         raise ConsortiumError(
             "personas_failed", f"could not write {PERSONAS_DIR}: {err}", path=PERSONAS_DIR
@@ -160,15 +122,16 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
 
 def _refuse_if_in_use(study_dir: Path) -> None:
     """``panel_in_use`` when ``board.db`` holds any Trial of a Panel Persona, which includes
-    every fidelity screening Trial (any layout version, never migrated, no lease);
-    perception screening's neutral Persona ``p0`` does not count (story 3.2).
-    ``board_unreadable`` / ``board_busy`` fail closed."""
-    if read_only(study_dir, lambda conn: any_panel_trials(conn, NEUTRAL_PERSONA_ID),
-                 allow_older=True):
+    every fidelity screening Trial, or any fidelity result, which includes those a
+    ``panel copy`` imported without Trials (story 3.4); any layout version, never
+    migrated, no lease. Perception screening's neutral Persona ``p0`` and perception
+    results do not count (story 3.2). ``board_unreadable`` / ``board_busy`` fail closed."""
+    if read_only(study_dir, lambda conn: any_panel_trials(conn, NEUTRAL_PERSONA_ID)
+                 or any_results(conn, "fidelity"), allow_older=True):
         raise ConsortiumError(
             "panel_in_use",
-            "board.db already holds Trials that reference this Panel; regenerating would "
-            "re-label them (start a new Study folder to change the Panel)",
+            "board.db already holds Trials or screening results that reference this Panel; "
+            "regenerating would re-label them (start a new Study folder to change the Panel)",
             path=DB_FILE,
         )
 
@@ -180,17 +143,11 @@ def _panel_exists() -> ConsortiumError:
 
 
 def _move_into_place(new: Path, target: Path) -> None:
-    """Rename ``new`` to ``target`` without --force.
-
-    POSIX ``rename`` replaces only an absent target or an empty directory, so a
-    Panel that appeared since the first check is never overwritten.
-    """
+    """Rename ``new`` to ``target`` without --force (``panel_exists`` when it is taken)."""
     try:
-        os.rename(new, target)
-    except OSError as err:
-        if err.errno in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
-            raise _panel_exists() from err
-        raise
+        move_into_place(new, target)
+    except FileExistsError as err:
+        raise _panel_exists() from err
 
 
 def _swap_into_place(new: Path, target: Path, study_dir: Path) -> None:

@@ -294,7 +294,7 @@ def test_failure_leaves_no_partial_panel(study: Path, monkeypatch: pytest.Monkey
     import consortium.stages.personas as stage
 
     calls = {"n": 0}
-    real = stage._write
+    real = stage.write_file
 
     def flaky(path: Path, data: bytes) -> None:
         calls["n"] += 1
@@ -302,7 +302,7 @@ def test_failure_leaves_no_partial_panel(study: Path, monkeypatch: pytest.Monkey
             raise OSError("disk full")
         real(path, data)
 
-    monkeypatch.setattr(stage, "_write", flaky)
+    monkeypatch.setattr(stage, "write_file", flaky)
     with pytest.raises(ConsortiumError) as info:
         generate(study)
     assert info.value.code == "personas_failed"
@@ -318,7 +318,7 @@ def test_force_failure_keeps_old_panel(study: Path, monkeypatch: pytest.MonkeyPa
     def boom(path: Path, data: bytes) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(stage, "_write", boom)
+    monkeypatch.setattr(stage, "write_file", boom)
     with pytest.raises(ConsortiumError):
         generate(study, force=True)
     assert _tree(study / "panel") == before

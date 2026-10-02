@@ -52,6 +52,54 @@ def any_runs(conn: sqlite3.Connection) -> bool:
     return conn.execute("SELECT 1 FROM screening_runs LIMIT 1").fetchone() is not None
 
 
+def any_results(conn: sqlite3.Connection, instrument: str | None = None) -> bool:
+    """Whether any screening result (of ``instrument`` when given, e.g. ``fidelity``)
+    exists, imported or not; False on a layout without the table."""
+    if not _has_table(conn, "screening_results"):
+        return False
+    return conn.execute(
+        "SELECT 1 FROM screening_results WHERE ? IS NULL OR instrument = ? LIMIT 1",
+        (instrument, instrument),
+    ).fetchone() is not None
+
+
+def current_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every complete, not superseded run in run-number order, each column as stored
+    (``settings_hashes`` stays canonical JSON); empty on a layout without the table
+    (story 3.4: what ``panel copy`` imports)."""
+    if not _has_table(conn, "screening_runs"):
+        return []
+    rows = [
+        dict(zip(_RUN_COLUMNS, r, strict=True))
+        for r in conn.execute(
+            f"SELECT {', '.join(_RUN_COLUMNS)} FROM screening_runs"
+            " WHERE status = 'complete' AND superseded_by IS NULL"
+        )
+    ]
+    return sorted(rows, key=lambda r: run_number(r["run_id"]))
+
+
+def import_runs(
+    conn: sqlite3.Connection,
+    runs: Iterable[Mapping[str, Any]],
+    results: Iterable[Mapping[str, Any]],
+    source_study: str,
+    source_hash: str,
+) -> None:
+    """Insert ``runs`` (every run column, as stored) and ``results`` as given, each
+    result stamped with ``source_study`` and ``source_hash`` (story 3.4), inside the
+    caller's transaction. No ``tests`` row and no Trials: imported runs are results only."""
+    conn.executemany(
+        f"INSERT INTO screening_runs ({', '.join(_RUN_COLUMNS)})"
+        f" VALUES ({', '.join('?' * len(_RUN_COLUMNS))})",
+        [tuple(run[c] for c in _RUN_COLUMNS) for run in runs],
+    )
+    for row in results:
+        record_result(
+            conn, row["run_id"], dict(row, source_study=source_study, source_hash=source_hash)
+        )
+
+
 def next_run_id(conn: sqlite3.Connection) -> str:
     """``s<n>`` with n = 1 + the highest run number in use (runs and ``tests`` names)."""
     names = [r[0] for r in conn.execute("SELECT name FROM tests")] if _has_table(

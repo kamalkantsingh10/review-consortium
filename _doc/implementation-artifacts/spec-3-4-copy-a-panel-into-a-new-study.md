@@ -2,7 +2,8 @@
 title: 'Story 3.4 — Copy a Panel into a new Study'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'e128142b16051216228d0df7926f6bedbe167674'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -43,7 +44,7 @@ context:
   - commit.
 
   If the rename fails, roll back. If the commit fails, remove the moved folder. Afterwards there is either both the Panel and the results, or neither.
-- **`panel_in_use` widens.** It is `board.trials.any_trials` or `board.screening.any_results` (any `screening_results` row, imported or not), so `personas generate --force` can't re-label imported results. Screening runs already create Trials, so this only adds the imported case.
+- **`panel_in_use` widens.** `personas generate` refuses on any Trial of a Panel Persona (`any_panel_trials`, `p0` excluded) or any fidelity result, imported or not (`any_results(conn, "fidelity")`), so `--force` can't re-label imported fidelity results. Perception results use the neutral `p0` and don't depend on the Panel, so they don't block it. `panel copy`'s own in-use check stays `any_trials or any_results`.
 - **Output.** stdout gets `copied <N> personas and <R> screening results (<n> runs) from <source_study> -> panel/personas`. With no results, stderr gets `no_screening_results` and the copy still succeeds.
 
 **Never:**
@@ -90,21 +91,47 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/config/panel_files.py` -- new: `INDEX_FILE`, `META_FILE` and the atomic-install helpers `write_file`, `fsync_dir`, `exists`, `sweep_stale`, `move_into_place`, moved from `stages/personas.py`. Layer-legal: `config` sits below `stages` and may import only stdlib and `core` (it is independent of `board`); `config/load.py` already owns `PERSONAS_DIR`. The module reads no YAML and holds no Study logic.
-- [ ] `src/consortium/stages/personas.py` -- use the moved helpers. `panel_in_use` = `any_trials` or `any_results` (still `read_only(..., allow_older=True)`).
-- [ ] `src/consortium/board/screening.py` -- `current_runs(conn)` (works on a migration-6 layout), `any_results(conn)` (false when the table is absent), and `import_runs(conn, runs, results, source_study, source_hash)`.
-- [ ] `src/consortium/stages/panel_copy.py` -- `copy_panel(study_dir, source_dir) -> CopySummary`, following the order and atomicity above.
-- [ ] `src/consortium/cli.py` -- the `panel` sub-app with `copy --from`.
-- [ ] `docs/INTERFACE.md` -- the command, `source_study` / `source_hash`, the widened `panel_in_use`, the error codes `panel_frame_mismatch` and `panel_mismatch` (with `panel copy` added as a raiser), and the warning `no_screening_results`.
-- [ ] `tests/test_panel_copy.py` -- one test per Matrix row; a test of the source tree's bytes, mtimes and absent side files; rollback when the rename fails (monkeypatched); and a copy-then-`open` test with the Fake rater that hits 3.3's stale and eligible paths.
+- [x] `src/consortium/config/panel_files.py` -- new: `INDEX_FILE`, `META_FILE` and the atomic-install helpers `write_file`, `fsync_dir`, `exists`, `sweep_stale`, `move_into_place`, moved from `stages/personas.py`. Layer-legal: `config` sits below `stages` and may import only stdlib and `core` (it is independent of `board`); `config/load.py` already owns `PERSONAS_DIR`. The module reads no YAML and holds no Study logic.
+- [x] `src/consortium/stages/personas.py` -- use the moved helpers. `panel_in_use` = `any_trials` or `any_results` (still `read_only(..., allow_older=True)`).
+- [x] `src/consortium/board/screening.py` -- `current_runs(conn)` (works on a migration-6 layout), `any_results(conn)` (false when the table is absent), and `import_runs(conn, runs, results, source_study, source_hash)`.
+- [x] `src/consortium/stages/panel_copy.py` -- `copy_panel(study_dir, source_dir) -> CopySummary`, following the order and atomicity above.
+- [x] `src/consortium/cli.py` -- the `panel` sub-app with `copy --from`.
+- [x] `docs/INTERFACE.md` -- the command, `source_study` / `source_hash`, the widened `panel_in_use`, the error codes `panel_frame_mismatch` and `panel_mismatch` (with `panel copy` added as a raiser), and the warning `no_screening_results`.
+- [x] `tests/test_panel_copy.py` -- one test per Matrix row; a test of the source tree's bytes, mtimes and absent side files; rollback when the rename fails (monkeypatched); and a copy-then-`open` test with the Fake rater that hits 3.3's stale and eligible paths.
 
 **Acceptance Criteria:**
 - Given a copy and an unchanged `models:` / Instruments in the target, when a Test is dry-run in the target, then 3.3 yields the same eligible Agents and exclusion reasons as the source's current results imply.
 - Given an imported result, then its `source_hash` recomputes from the target's Panel files and imported rows.
-- Given a copy, when `personas generate --force` runs in the target, then it refuses with `panel_in_use`.
+- Given a copy that imported fidelity results, when `personas generate --force` runs in the target, then it refuses with `panel_in_use`.
 
 ## Verification
 
 **Commands:**
 - `uv run pytest -q tests/test_panel_copy.py tests/test_personas.py` -- expected: all pass
 - `uv run pytest -q && uv run ruff check src tests && uv run lint-imports` -- expected: clean
+
+## Review Triage Log
+
+Three parallel reviewers (A: correctness against the spec; B: atomicity, read-only source, data integrity; C: layering, consistency, over-engineering). Dispositions: **fixed**, **deferred** (real but out of scope or low value now), **rejected** (not a defect / by design).
+
+| # | Src | Sev | Finding | Disposition |
+|---|-----|-----|---------|-------------|
+| 1 | A, B, C | med | `personas generate` guard is `any_panel_trials(p0 excluded) or any_results(conn, "fidelity")`, not the frozen Boundaries line `any_trials or any_results`; the third acceptance criterion fails for a source with only perception results. | **Kept; spec Boundaries and AC3 amended to match (accepted 2026-10-02).** Follows the as-built note (count fidelity results) and keeps 3.2's `p0` exception; perception results do not depend on the Panel. Pinned by `test_imported_perception_results_alone_do_not_freeze_the_panel`. `panel copy`'s own check 5 is the literal `any_trials or any_results`. |
+| 2 | A | low-med | Source `board.db` was read after the target checks and the stale sweep, so a source error was reported late and after deleting target work folders. | **Fixed.** Read between checks 4 and 5; test asserts a stale folder survives a `board_version_mismatch` refusal. |
+| 3 | A, B | med | `sqlite3.Error` from the import or COMMIT escaped as a traceback; the commit test faked an `OSError`. | **Fixed.** Mapped to `personas_failed` (path `board.db`); commit tests raise `sqlite3.OperationalError`. |
+| 4 | A, B | med | Commit failure plus a failed rename-back left a Panel without results, silently. | **Fixed.** Falls back to `rmtree(panel/personas)`; test covers the double failure. |
+| 5 | B | med/low | The rename was fsynced only after the commit. | **Fixed.** `fsync_dir(panel)` right after the rename, inside the transaction. |
+| 6 | B | low | Every regular file of the source folder was copied (strays, editor backups, symlink targets). | **Fixed.** Copies exactly the cards of `index.json`'s Personas, `index.json` and `meta.json` (if present); test with a stray file. |
+| 7 | A | low | `panel_mismatch` path pointed at the target. | **Fixed.** `path` is `<SOURCE>/panel/personas/p<n>.md`. |
+| 8 | A | low | No tests for check order, source `panel_invalid`; `_refused` ignored mtimes. | **Fixed.** `test_first_error_wins`, `test_invalid_source_panel`; `_refused` compares bytes and mtimes. |
+| 9 | A, C | low | INTERFACE: error rows missing `panel copy` as raiser; source board read order undocumented. | **Fixed.** |
+| 10 | C | low | Source columns filtered twice; nested `def` in `personas._refuse_if_in_use`; string-built SQL in `any_results`. | **Fixed.** One filter (in the hash), lambda restored, single parameterised query. |
+| 11 | C | low | Hash acceptance test reused the code's own hash function. | **Fixed.** Test recomputes the documented formula with `hashlib`/`json`; the helper is private `_source_hash`. |
+| 12 | A, B | low | `index.json` is read twice (`load_personas`, then the byte read); a concurrent regeneration of the source in between could copy an index other than the validated one. Cards are checked against the copied bytes, so a real swap is caught. | **Deferred.** Needs a bytes-level parse helper in `config.load`; not worth it for a source nobody should be regenerating mid-copy. |
+| 13 | B | med | Frame check compares the two `study.yaml` frames only; a source whose `study.yaml` was edited after `personas generate` copies a Panel from another frame. Suggested: also check `meta.json` `frame_sha256`. | **Deferred.** Spec decision compares `study.yaml` frames; `frame_sha256` hashes the frame JSON with defaults of the generating version, so it would refuse legitimate older Panels. The card re-render check still catches wording/quota-phrase drift. |
+| 14 | B | low/med | Source with a stale `-wal` but no `-shm` gets a `-shm` created; a read-only source folder with a `-wal` fails `board_unreadable`. | **Deferred.** Behaviour of the shared `board.db.read_only` (used by every read-only command), not specific to 3.4. |
+| 15 | B | low | Stale sweep runs outside the lease (same as `personas generate`, which takes no lease); concurrent Panel writers in one target could delete each other's work folder. | **Deferred.** Pre-existing design shared with `personas generate`. |
+| 16 | B | nit | A late (under-lease) refusal leaves an empty `panel/` and a created/migrated `board.db`; crash windows between rename and commit. | **Rejected.** Spec allows `connect` to create/migrate; crash durability beyond both-or-neither on failure is out of scope. |
+| 17 | B | nit | Imported perception runs keep the source's `screening_test` name. | **Rejected.** Spec says copy all fields unchanged; the gate does not key on it. |
+| 18 | C | low | `_frame` duplicates the frame JSON in `personas._meta`; `current_runs` near-duplicates `list_runs`. | **Rejected.** Stages cannot import each other; `current_runs` keeps `settings_hashes` raw for a verbatim copy. |
+| 19 | C | low | `test_panel_copy.py` imports private helpers from `test_open_gate`. | **Rejected.** Same practice as `test_open_gate` importing from `test_screen_models`; renaming would churn another story's tests. |

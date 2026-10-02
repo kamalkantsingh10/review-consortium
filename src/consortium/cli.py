@@ -16,6 +16,7 @@ from consortium.stages import personas as personas_stage
 from consortium.stages.export import export_test
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, usd
+from consortium.stages.panel_copy import copy_panel
 from consortium.stages.push import push_clip, push_test
 from consortium.stages.screen import (
     ScreenSummary,
@@ -114,6 +115,31 @@ def personas_generate_cmd(
     """Write panel/personas/p<n>.md cards and index.json from study.yaml's seed and frame."""
     personas = personas_stage.generate(study, force=force)
     typer.echo(f"{len(personas)} personas -> {personas_stage.PERSONAS_DIR}")
+
+
+panel_app = typer.Typer(help="Reuse a screened Panel from another Study.")
+app.add_typer(panel_app, name="panel")
+
+
+@panel_app.command("copy")
+def panel_copy_cmd(
+    source: Annotated[
+        Path, typer.Option("--from", help="Study folder whose Panel and screening to copy.")
+    ],
+    study: StudyOption = Path("."),
+) -> None:
+    """Copy SOURCE's panel/personas byte for byte and import its current screening results
+    (with their source Study and hash). SOURCE is only read."""
+    summary = copy_panel(study, source)
+    typer.echo(
+        f"copied {summary.personas} personas and {summary.results} screening results "
+        f"({summary.runs} runs) from {summary.source_study} -> {personas_stage.PERSONAS_DIR}"
+    )
+    if not summary.results:
+        typer.echo(
+            f"no_screening_results: {summary.source_study} has no current screening results; "
+            "screen this Study before a gated Test", err=True,
+        )
 
 
 def _stdin_is_tty() -> bool:
