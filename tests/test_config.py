@@ -742,3 +742,50 @@ def test_retry_policy_has_no_per_test_override() -> None:
     from consortium.config.models import SessionOverrides
 
     assert "retry" not in SessionOverrides.model_fields
+
+
+# --------------------------------------------------------------------------- story 2.2 settings
+
+
+@pytest.mark.parametrize(
+    "setting", ["fps: 1", "media_resolution: low", "thinking_level: low", "api_key_env: MY_KEY",
+                "seed_supported: true"]
+)
+def test_gemini_settings_on_fake_are_config_invalid(study: Path, setting: str) -> None:
+    _edit(study / "study.yaml", "      temperature: 0.7      # > 0\n",
+          f"      temperature: 0.7      # > 0\n      {setting}\n")
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid"
+    assert setting.split(":")[0] in info.value.message
+
+
+def test_gemini_settings_and_key_env_name(study: Path) -> None:
+    text = (study / "study.yaml").read_text()
+    text = text.replace("provider: fake ", "provider: gemini ", 1)
+    text = text.replace("      temperature: 0.7      # > 0\n",
+                        "      temperature: 0.7      # > 0\n      fps: 2\n"
+                        "      media_resolution: high\n      thinking_level: minimal\n", 1)
+    text = text[: text.index("    fake:")] + text[text.index("# Canonical media"):]
+    (study / "study.yaml").write_text(text)
+    model = load_study(study).models[0]
+    assert (model.settings.fps, model.settings.media_resolution,
+            model.settings.thinking_level, model.settings.seed_supported) == (
+        2.0, "high", "minimal", True)
+    assert model.api_key_env_name == "GEMINI_API_KEY"
+    assert model.model_copy(update={"provider": "qwen"}).api_key_env_name == "DASHSCOPE_API_KEY"
+    assert model.model_copy(update={"provider": "fake"}).api_key_env_name is None
+
+
+@pytest.mark.parametrize("setting", ["fps: 0", "fps: .inf", "fps: .nan",
+                                     "media_resolution: ultra", "thinking_level: max",
+                                     "api_key_env: 'bad name'", "seed_supported: 'yes'"])
+def test_gemini_setting_values_checked(study: Path, setting: str) -> None:
+    text = (study / "study.yaml").read_text().replace("provider: fake ", "provider: gemini ", 1)
+    text = text[: text.index("    fake:")] + text[text.index("# Canonical media"):]
+    text = text.replace("      temperature: 0.7      # > 0\n",
+                        f"      temperature: 0.7      # > 0\n      {setting}\n", 1)
+    (study / "study.yaml").write_text(text)
+    with pytest.raises(ConsortiumError) as info:
+        load_study(study)
+    assert info.value.code == "config_invalid"

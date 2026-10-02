@@ -2,7 +2,8 @@
 title: 'Story 2.2 — Gemini adapter'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'bb2c0d304daa76e0ab15b733f0618f126d78ba28'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -94,19 +95,19 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pyproject.toml` -- Add `google-genai>=2.27,<2.28`. Register the pytest marker `live` and add `-m "not live"` to `addopts`. Add `google`/`openai` to core's forbidden import contract.
-- [ ] `src/consortium/core/prompt.py` -- `Text`, `Media`, `PROMPT_FORMAT`, `compose`.
-- [ ] `src/consortium/raters/base.py` -- `ModelSpec`, `RaterResult.settings`.
-- [ ] `src/consortium/raters/gemini.py` -- `GeminiRater(spec, client=None, now=None)` per the rules above. Lazily builds `genai.Client(api_key=...)`.
-- [ ] `src/consortium/config/models.py`, `docs/schema/`, `src/consortium/templates/study/study.yaml` -- Settings additions (incl. `thinking_level`), validators and `api_key_env_name`; a commented gemini Model example with `thinking_level: low`. Regenerate the schemas.
-- [ ] `src/consortium/stages/open.py` -- Gemini branch, `ModelSpec` from config plus env, `api_key_missing`.
-- [ ] `src/consortium/archive/jsonl.py`, `src/consortium/engine/dispatch.py` -- Pass `settings` through.
-- [ ] `docs/INTERFACE.md` -- New settings (incl. `thinking_level`), key env vars, the response `settings` field, `api_key_missing`/`prepare_failed`, the gemini price derivation, the File naming and 48 h reuse.
-- [ ] `tests/recorded.py`, `tests/fixtures/gemini/*.json` -- A fake `aio.files`/`aio.models` client that replays recorded responses and raises recorded `APIError`s, logging the calls made.
-- [ ] `tests/test_prompt.py` -- Golden `compose` output for a single, pairwise and practice request. Purity: the same input gives an equal tuple.
-- [ ] `tests/test_gemini.py` -- Every matrix row. Also: the sent parts equal `compose` mapped one-to-one, with static processing and fps; seed omitted when `seed_supported: false`; `thinking_config` sent and archived only when `thinking_level` is set; a 2nd `prepare` of a Clip makes no upload; the key never appears in `raw` or the handle.
-- [ ] `tests/test_open.py` -- `api_key_missing` before confirmation; a dry run needs no key; Archive response lines carry `settings`.
-- [ ] `tests/test_live_gemini.py` -- `@pytest.mark.live`, skipped without `GEMINI_API_KEY`. One 2 s ffmpeg `testsrc` Clip, one Trial, end to end: it reaches a terminal state and has a `model_build`.
+- [x] `pyproject.toml` -- Add `google-genai>=2.27,<2.28`. Register the pytest marker `live` and add `-m "not live"` to `addopts`. Add `google`/`openai` to core's forbidden import contract.
+- [x] `src/consortium/core/prompt.py` -- `Text`, `Media`, `PROMPT_FORMAT`, `compose`.
+- [x] `src/consortium/raters/base.py` -- `ModelSpec`, `RaterResult.settings`.
+- [x] `src/consortium/raters/gemini.py` -- `GeminiRater(spec, client=None, now=None)` per the rules above. Lazily builds `genai.Client(api_key=...)`.
+- [x] `src/consortium/config/models.py`, `docs/schema/`, `src/consortium/templates/study/study.yaml` -- Settings additions (incl. `thinking_level`), validators and `api_key_env_name`; a commented gemini Model example with `thinking_level: low`. Regenerate the schemas.
+- [x] `src/consortium/stages/open.py` -- Gemini branch, `ModelSpec` from config plus env, `api_key_missing`.
+- [x] `src/consortium/archive/jsonl.py`, `src/consortium/engine/dispatch.py` -- Pass `settings` through.
+- [x] `docs/INTERFACE.md` -- New settings (incl. `thinking_level`), key env vars, the response `settings` field, `api_key_missing`/`prepare_failed`, the gemini price derivation, the File naming and 48 h reuse.
+- [x] `tests/recorded.py`, `tests/fixtures/gemini/*.json` -- A fake `aio.files`/`aio.models` client that replays recorded responses and raises recorded `APIError`s, logging the calls made.
+- [x] `tests/test_prompt.py` -- Golden `compose` output for a single, pairwise and practice request. Purity: the same input gives an equal tuple.
+- [x] `tests/test_gemini.py` -- Every matrix row. Also: the sent parts equal `compose` mapped one-to-one, with static processing and fps; seed omitted when `seed_supported: false`; `thinking_config` sent and archived only when `thinking_level` is set; a 2nd `prepare` of a Clip makes no upload; the key never appears in `raw` or the handle.
+- [x] `tests/test_open.py` -- `api_key_missing` before confirmation; a dry run needs no key; Archive response lines carry `settings`.
+- [x] `tests/test_live_gemini.py` -- `@pytest.mark.live`, skipped without `GEMINI_API_KEY`. One 2 s ffmpeg `testsrc` Clip, one Trial, end to end: it reaches a terminal state and has a `model_build`.
 
 **Acceptance Criteria:**
 - Given a gemini Model and the key, when a Test runs with the recorded client, then each distinct Clip is uploaded once and every attempt's response line holds `raw`, `usage`, `model_build` and `settings`, with an actual cost in the ledger.
@@ -117,6 +118,23 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC | Reused File never checked against Clip content; names collide across Studies/Models; one Rater deletes another's File; concurrent re-prepare races | high | patch (content-addressed names, hash check, never delete ACTIVE, per-Clip lock, 409=exists) |
+| 2 | BH, EC | prepare retries non-transient errors; poll errors not retried; OSError conflates network and local | medium | patch |
+| 3 | BH, EC | 403 from a bad key re-prepares all Clips; prepare_failed escapes submit after mark_sent; partial multi-call loss; missing uri KeyError | high | patch |
+| 4 | BH, EC | No request timeout; non-httpx SDK errors escape | medium | patch |
+| 5 | EC | IMAGE_SAFETY and other safety finish reasons classed ok | medium | patch (refused) |
+| 6 | EC | Key straddling the truncation boundary survives redaction | high | patch |
+| 7 | BH, EC | Practice pairs unlabelled; >2 Clips dropped; label fallback mismatch | medium | patch |
+| 8 | EC | Whitespace-only key passes | low | patch |
+| 9 | EC, BH | fps inf accepted; seed_supported on fake | low | patch |
+| 10 | BH | httpx undeclared | low | patch (pin narrowness kept for reproducibility) |
+| 11 | BH | Template example incomplete; media_tokens guidance; documented flag undefined | low | patch (docs) |
+| 12 | BH, EC | Live test too weak; leaves its File | low | patch |
+| 13 | VG | _model_spec mapping, resume api_key_missing, prepare_failed stop/resume, poll/404/PROCESSING branches, Fake settings shape untested | medium | patch (tests) |
+| 14 | EC | ACTIVE without uri; no expiration_time | low | patch |
 
 ## Design Notes
 

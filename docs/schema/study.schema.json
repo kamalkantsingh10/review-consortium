@@ -191,11 +191,82 @@
     "ModelSettings": {
       "additionalProperties": false,
       "properties": {
+        "api_key_env": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Env var holding the API key (default GEMINI_API_KEY for gemini, DASHSCOPE_API_KEY for qwen); never put the key itself in a Study file.",
+          "title": "Api Key Env"
+        },
+        "fps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Frames per second sampled from each Clip; gemini only.",
+          "title": "Fps"
+        },
+        "media_resolution": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Media resolution per frame; gemini only.",
+          "title": "Media Resolution"
+        },
+        "seed_supported": {
+          "default": true,
+          "description": "Send the attempt seed with each request.",
+          "title": "Seed Supported",
+          "type": "boolean"
+        },
         "temperature": {
           "default": 0.7,
           "exclusiveMinimum": 0,
           "title": "Temperature",
           "type": "number"
+        },
+        "thinking_level": {
+          "anyOf": [
+            {
+              "enum": [
+                "minimal",
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pinned thinking level; gemini only.",
+          "title": "Thinking Level"
         }
       },
       "title": "ModelSettings",

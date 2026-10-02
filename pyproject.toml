@@ -8,6 +8,8 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "google-genai>=2.27,<2.28",
+    "httpx>=0.28,<0.29",
     "pydantic>=2.13,<2.14",
     "pyyaml>=6,<7",
     "typer>=0.27,<0.28",
@@ -38,7 +40,10 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Block ROS launch_testing plugins that leak in via a sourced ROS PYTHONPATH and fail to import.
-addopts = "-p no:launch_testing -p no:launch_ros"
+addopts = "-p no:launch_testing -p no:launch_ros -m 'not live'"
+markers = [
+    "live: talks to a real provider; opt-in (needs the API key env var)",
+]
 
 [tool.importlinter]
 root_package = "consortium"
@@ -65,4 +70,4 @@ modules = ["consortium.stages.*"]
 name = "AD-1 core imports only stdlib and pydantic"
 type = "forbidden"
 source_modules = ["consortium.core"]
-forbidden_modules = ["yaml", "typer"]
+forbidden_modules = ["yaml", "typer", "google", "openai"]

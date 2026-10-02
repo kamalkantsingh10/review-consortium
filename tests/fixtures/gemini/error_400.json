@@ -1,0 +1,7 @@
+{
+  "api_error": {
+    "code": 400,
+    "status": "INVALID_ARGUMENT",
+    "message": "Request contains an invalid argument."
+  }
+}

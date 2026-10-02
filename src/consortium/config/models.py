@@ -82,8 +82,36 @@ class _Strict(BaseModel):
 # --------------------------------------------------------------------------- study.yaml
 
 
+_ENV_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+# Settings only one provider understands (story 2.2); any other provider: config_invalid.
+_PROVIDER_ONLY_SETTINGS = {
+    "fps": "gemini",
+    "media_resolution": "gemini",
+    "thinking_level": "gemini",
+}
+_DEFAULT_KEY_ENV = {"gemini": "GEMINI_API_KEY", "qwen": "DASHSCOPE_API_KEY"}
+
+
 class ModelSettings(_Strict):
     temperature: Annotated[StrictFloat, Field(gt=0)] = 0.7
+    fps: Annotated[float, Field(gt=0, strict=True, allow_inf_nan=False)] | None = Field(
+        default=None, description="Frames per second sampled from each Clip; gemini only."
+    )
+    seed_supported: StrictBool = Field(
+        default=True, description="Send the attempt seed with each request."
+    )
+    media_resolution: Literal["low", "medium", "high"] | None = Field(
+        default=None, description="Media resolution per frame; gemini only."
+    )
+    thinking_level: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default=None, description="Pinned thinking level; gemini only."
+    )
+    api_key_env: Annotated[StrictStr, Field(pattern=_ENV_NAME_PATTERN)] | None = Field(
+        default=None,
+        description="Env var holding the API key (default GEMINI_API_KEY for gemini, "
+        "DASHSCOPE_API_KEY for qwen); never put the key itself in a Study file.",
+    )
 
 
 class MediaLimits(_Strict):
@@ -139,6 +167,24 @@ class ModelConfig(_Strict):
         if self.fake is not None and self.provider != "fake":
             raise ValueError("fake: only allowed for provider: fake")
         return self
+
+    @model_validator(mode="after")
+    def _settings_fit_provider(self) -> ModelConfig:
+        for name, provider in _PROVIDER_ONLY_SETTINGS.items():
+            if getattr(self.settings, name) is not None and self.provider != provider:
+                raise ValueError(f"settings.{name}: only allowed for provider: {provider}")
+        if self.provider == "fake":
+            for name in ("api_key_env", "seed_supported"):
+                if name in self.settings.model_fields_set:
+                    raise ValueError(f"settings.{name}: not allowed for provider: fake")
+        return self
+
+    @property
+    def api_key_env_name(self) -> str | None:
+        """The env var holding this Model's API key; None for the Fake rater."""
+        if self.provider == "fake":
+            return None
+        return self.settings.api_key_env or _DEFAULT_KEY_ENV[self.provider]
 
     @property
     def fake_settings(self) -> FakeSettings:

@@ -27,6 +27,28 @@ models:
       transient_rate: 0     # 0-1: share of attempts that hit a simulated rate limit / transport error
       refusal_rate: 0       # 0-1: share of attempts that are refused (Trial ends refused)
       fatal_rate: 0         # 0-1: share of attempts that fail fatally (Trial ends failed)
+  # A Gemini Model (uncomment to use; the key is read from GEMINI_API_KEY, never from here).
+  # It also needs a matching prices.yaml entry, with media_tokens_per_s for its
+  # media_resolution and fps (per-frame tokens x fps + 32 audio tokens/s), e.g. for low at 1 fps:
+  #   m2:
+  #     input_usd_per_mtok: "<USD per million input tokens>"
+  #     output_usd_per_mtok: "<USD per million output tokens>"
+  #     media_tokens_per_s: "98"    # 66 x 1 + 32
+  # - id: m2
+  #   provider: gemini
+  #   model: gemini-3-flash-preview   # pinned version
+  #   settings:
+  #     temperature: 0.7
+  #     seed_supported: true
+  #     fps: 1                  # gemini only: frames sampled per second
+  #     media_resolution: low   # gemini only: low | medium | high
+  #     thinking_level: low     # gemini only: minimal | low | medium | high
+  #     # api_key_env: GEMINI_API_KEY
+  #   max_output_tokens: 1024
+  #   limits:
+  #     max_seconds: 600
+  #     max_bytes: 2000000000
+  #     inline_base64: false    # Clips go through the File API
 
 # Canonical media profile every Clip is re-encoded to at ingest.
 media:

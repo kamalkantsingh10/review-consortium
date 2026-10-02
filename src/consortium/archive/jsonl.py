@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -109,10 +110,13 @@ def append_response(
     model_build: str | None,
     category: str,
     ts: str | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append ``{trial_id, attempt, request_sha256, raw, usage, model_build, category, ts}``.
 
-    ``request_sha256`` is that of the attempt's request line. Returns the record.
+    ``request_sha256`` is that of the attempt's request line. ``settings`` (the
+    settings the adapter sent, ``{name: {value, documented}}``) is added as a
+    ``settings`` field only when not None. Returns the record.
     """
     record = {
         "trial_id": trial_id,
@@ -124,6 +128,8 @@ def append_response(
         "category": category,
         "ts": ts or utc_now_ms(),
     }
+    if settings is not None:
+        record["settings"] = dict(settings)
     _append(study_dir, RESPONSES_FILE, record)
     return record
 

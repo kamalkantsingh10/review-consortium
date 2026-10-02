@@ -1,0 +1,16 @@
+{
+  "candidates": [
+    {
+      "finish_reason": "STOP",
+      "index": 0,
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"alive\":\"B\"}"
+          }
+        ]
+      }
+    }
+  ]
+}

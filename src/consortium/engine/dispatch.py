@@ -423,6 +423,7 @@ async def dispatch(
                 study, trial_id=tid, attempt=attempt, request_sha256=request_sha256,
                 raw=result.raw, usage=result.usage,
                 model_build=result.model_build, category=result.category,
+                settings=result.settings,
             ),
             tid, attempt,
         )

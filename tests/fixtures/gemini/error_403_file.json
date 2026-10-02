@@ -1,0 +1,7 @@
+{
+  "api_error": {
+    "code": 403,
+    "status": "PERMISSION_DENIED",
+    "message": "You do not have permission to access the File rc-c-aaaaaaaa or it may not exist."
+  }
+}

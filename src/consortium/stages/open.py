@@ -38,6 +38,7 @@ import asyncio
 import dataclasses
 import functools
 import hashlib
+import os
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -74,6 +75,7 @@ from consortium.config.load import (
 from consortium.config.load import load_test as load_test_file
 from consortium.config.models import (
     InstrumentDef,
+    ModelConfig,
     PricesConfig,
     RetryPolicy,
     StudyConfig,
@@ -86,9 +88,12 @@ from consortium.core.render import TrialRequest, canonical_json, practice_for, r
 from consortium.core.seeds import derive_seed
 from consortium.core.test_checks import check_media_limits, check_plan
 from consortium.engine.dispatch import Budget, dispatch
-from consortium.raters.base import Rater
+from consortium.raters.base import ModelSpec, Rater
 from consortium.raters.fake import FakeRater
+from consortium.raters.gemini import GeminiRater
 
+# The Study's Clip folder, as stages.push writes it (stages never import one another).
+CLIPS_DIR = "clips"
 Confirm = Callable[[str], bool]
 Announce = Callable[[list[str]], None]
 
@@ -566,7 +571,7 @@ def _resume(
         announce(shown)
     _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
                      estimate.expected, fresh=False)
-    raters_for(ctx.cfg, model_ids)  # provider_unavailable before confirmation
+    raters_for(ctx.cfg, model_ids, study)  # provider/key errors before confirmation
     if res.todo and not yes:
         if confirm is None:
             raise ConsortiumError(
@@ -595,7 +600,7 @@ def _resume(
             raise changed
         res_now = _load_resumable(study, test, ctx_now)
         models_now = _resume_models(ctx_now.cfg, test, res_now)
-        raters_now = raters_for(ctx_now.cfg, models_now)
+        raters_now = raters_for(ctx_now.cfg, models_now, study)
         if (
             res_now.digest != res.digest
             or res_now.key() != res.key()
@@ -687,25 +692,48 @@ async def _dispatch_resume(
         return states, committed, paused
 
 
-def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
-    """``model_id -> Rater``. Only ``fake`` exists so far: one ``FakeRater`` per Model,
-    reporting that Model's ``fake`` usage and simulating its ``fake`` rates (they share
-    the provider's semaphore)."""
+def raters_for(cfg: StudyConfig, model_ids: list[str], study: Path) -> dict[str, Rater]:
+    """``model_id -> Rater``: the one place a provider is mapped to an adapter class.
+
+    ``fake``: one ``FakeRater`` per Model, reporting that Model's ``fake`` usage and
+    simulating its ``fake`` rates. ``gemini``: a ``GeminiRater`` with a ``ModelSpec``
+    built from the config plus the key from the Model's key env var
+    (``api_key_missing`` when it is unset or empty). Building a Rater makes no
+    network call. ``qwen`` has no adapter yet (``provider_unavailable``).
+    """
     out: dict[str, Rater] = {}
     for model_id in model_ids:
         model = cfg.model_by_id(model_id)
-        if model.provider != "fake":
+        if model.provider == "fake":
+            fake = model.fake_settings
+            out[model_id] = FakeRater(
+                input_tokens=fake.input_tokens, output_tokens=fake.output_tokens,
+                invalid_rate=fake.invalid_rate, transient_rate=fake.transient_rate,
+                refusal_rate=fake.refusal_rate, fatal_rate=fake.fatal_rate,
+            )
+        elif model.provider == "gemini":
+            out[model_id] = GeminiRater(_model_spec(model, study))
+        else:
             raise ConsortiumError(
                 "provider_unavailable",
                 f"model {model_id}: provider {model.provider!r} has no adapter yet (Epic 2)",
             )
-        fake = model.fake_settings
-        out[model_id] = FakeRater(
-            input_tokens=fake.input_tokens, output_tokens=fake.output_tokens,
-            invalid_rate=fake.invalid_rate, transient_rate=fake.transient_rate,
-            refusal_rate=fake.refusal_rate, fatal_rate=fake.fatal_rate,
-        )
     return out
+
+
+def _model_spec(model: ModelConfig, study: Path) -> ModelSpec:
+    env = model.api_key_env_name or ""
+    api_key = os.environ.get(env, "").strip() if env else ""
+    if not api_key:
+        raise ConsortiumError("api_key_missing", f"{model.id}: set {env}")
+    s = model.settings
+    return ModelSpec(
+        model_id=model.id, provider=model.provider, model=model.model,
+        temperature=s.temperature, fps=s.fps, seed_supported=s.seed_supported,
+        media_resolution=s.media_resolution, thinking_level=s.thinking_level,
+        api_key=api_key, max_output_tokens=model.max_output_tokens,
+        clips_dir=study / CLIPS_DIR,
+    )
 
 
 def _render_all(
@@ -761,7 +789,7 @@ def _run(
         announce(shown)
     _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
                      estimate.expected, fresh=True)
-    raters_for(cfg, model_ids)  # provider_unavailable before confirmation
+    raters_for(cfg, model_ids, study)  # provider/key errors before confirmation
     if not yes:
         if confirm is None:
             raise ConsortiumError(
@@ -786,7 +814,7 @@ def _run(
             raise changed from err
         ctx_now, plan2, requests2 = _plan_and_render(study, test)
         pairs2, digest_now = _render_all(plan2, requests2)
-        raters_now = raters_for(ctx_now.cfg, model_ids)
+        raters_now = raters_for(ctx_now.cfg, model_ids, study)
         if (
             ctx_now.test_sha256 != test_sha256
             or digest_now != digest

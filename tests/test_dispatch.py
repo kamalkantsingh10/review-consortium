@@ -301,7 +301,7 @@ def test_other_provider_unavailable(study: Path) -> None:
     doc = yaml.safe_load(cfg.read_text())
     model = doc["models"][0]
     del model["fake"]
-    model["provider"] = "gemini"
+    model["provider"] = "qwen"  # no adapter until story 2.3
     cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
     result = _cli("pilot1", "--yes", "--ceiling", "5", "--study", str(study))
     assert result.exit_code == 1

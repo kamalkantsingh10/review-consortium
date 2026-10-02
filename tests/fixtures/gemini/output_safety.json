@@ -1,0 +1,38 @@
+{
+  "candidates": [
+    {
+      "finish_reason": "SAFETY",
+      "index": 0,
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "partial"
+          }
+        ]
+      }
+    }
+  ],
+  "model_version": "gemini-3-flash-preview-09-2026",
+  "usage_metadata": {
+    "prompt_token_count": 1200,
+    "candidates_token_count": 40,
+    "thoughts_token_count": 60,
+    "tool_use_prompt_token_count": 5,
+    "total_token_count": 1305,
+    "prompt_tokens_details": [
+      {
+        "modality": "TEXT",
+        "token_count": 400
+      },
+      {
+        "modality": "VIDEO",
+        "token_count": 700
+      },
+      {
+        "modality": "AUDIO",
+        "token_count": 100
+      }
+    ]
+  }
+}

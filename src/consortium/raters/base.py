@@ -9,7 +9,9 @@ settings only and never change the request text.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol, get_args
 
 from consortium.core.render import ClipRef, TrialRequest
@@ -55,9 +57,34 @@ class RaterResult:
     """
 
     raw: str
-    usage: dict[str, int]  # {input_tokens, output_tokens}
+    usage: dict[str, int]  # {input_tokens, output_tokens} plus provider detail keys
     model_build: str | None
     category: Category
+    # The settings actually sent, as {name: {"value": v, "documented": bool}} (story 2.2);
+    # archived on the response line only when not None.
+    settings: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Everything a real adapter needs, as plain values (built only by
+    ``stages.open.raters_for``, so adapters never import config).
+
+    ``api_key`` comes from the Model's key env var and is never shown in a repr.
+    ``clips_dir`` is the Study's ``clips/`` folder (``<clip_id>.mp4``).
+    """
+
+    model_id: str
+    provider: str
+    model: str
+    temperature: float
+    fps: float | None
+    seed_supported: bool
+    media_resolution: str | None
+    thinking_level: str | None
+    api_key: str = field(repr=False)
+    max_output_tokens: int
+    clips_dir: Path
 
 
 class Rater(Protocol):
