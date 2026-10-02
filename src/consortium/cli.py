@@ -106,6 +106,23 @@ def personas_generate_cmd(
     typer.echo(f"{len(personas)} personas -> {personas_stage.PERSONAS_DIR}")
 
 
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _confirm(prompt: str) -> bool:
+    """Ask on the terminal (default no); ``confirmation_required`` when stdin is not a TTY."""
+    if not _stdin_is_tty():
+        raise ConsortiumError(
+            "confirmation_required", "stdin is not a terminal; pass --yes to confirm"
+        )
+    try:
+        return typer.confirm(prompt, default=False, err=True)
+    except typer.Abort:  # EOF or Ctrl-C at the prompt
+        typer.echo("", err=True)
+        return False
+
+
 @app.command("open")
 def open_cmd(
     test: Annotated[str, typer.Argument(help="Name of a registered Test.")],
@@ -120,7 +137,19 @@ def open_cmd(
     resume: Annotated[bool, typer.Option("--resume", help="Resume an open Test.")] = False,
     study: StudyOption = Path("."),
 ) -> None:
-    """Plan and render TEST's Trials (with --dry-run: print counts, change nothing)."""
-    summary = open_test(study, test, dry_run=dry_run, yes=yes, ceiling=ceiling, resume=resume)
-    for line in summary.lines():
+    """Plan, render and run TEST's Trials (with --dry-run: print counts, change nothing)."""
+    announced: list[str] = []
+
+    def announce(lines: list[str]) -> None:  # printed before dispatch starts
+        for line in lines:
+            typer.echo(line)
+        announced.extend(lines)
+
+    summary = open_test(
+        study, test, dry_run=dry_run, yes=yes, ceiling=ceiling, resume=resume,
+        confirm=_confirm, announce=announce,
+    )
+    for line in summary.lines()[len(announced):]:
         typer.echo(line)
+    if summary.not_valid:
+        typer.echo(f"warning: {summary.not_valid} Trials did not end valid", err=True)

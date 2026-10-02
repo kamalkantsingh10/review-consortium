@@ -212,14 +212,6 @@ def test_no_personas_is_panel_missing(fresh: Path) -> None:
     assert info.value.code == "panel_missing"
 
 
-def test_without_dry_run_is_unavailable(study: Path) -> None:
-    before = _snapshot(study)
-    result = _cli("pilot1", "--study", str(study))
-    assert result.exit_code == 1
-    assert result.stderr == "run_unavailable: dispatch arrives in story 1.7\n"
-    assert _snapshot(study) == before
-
-
 def test_edited_registered_file_refused(fresh: Path) -> None:
     path = fresh / "tests" / "pilot1.yaml"
     path.write_text(path.read_text() + "# edited\n")

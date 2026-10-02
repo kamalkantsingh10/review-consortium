@@ -63,7 +63,52 @@ def m2_tests(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX test_clips_by_clip ON test_clips (clip_id, role)")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [m1_clips, m2_tests]
+def m3_trials(conn: sqlite3.Connection) -> None:
+    """Story 1.7: planned Trials (every ``core.plan.Trial`` field) and their attempts."""
+    conn.execute(
+        """
+        CREATE TABLE trials (
+            trial_id       TEXT PRIMARY KEY,
+            test           TEXT NOT NULL REFERENCES tests(name),
+            session_id     TEXT NOT NULL,
+            trial_index    INTEGER NOT NULL,
+            instrument     TEXT NOT NULL,
+            clip_ids       TEXT NOT NULL,
+            pair_id        TEXT,
+            position       INTEGER,
+            prompt_variant TEXT NOT NULL,
+            order_seed     INTEGER NOT NULL,
+            repeat         INTEGER NOT NULL,
+            agent_id       TEXT NOT NULL,
+            persona_id     TEXT NOT NULL,
+            model_id       TEXT NOT NULL,
+            state          TEXT NOT NULL DEFAULT 'planned' CHECK (state IN
+                               ('planned', 'sent', 'valid', 'invalid', 'refused', 'failed')),
+            attempt        INTEGER NOT NULL DEFAULT 0,
+            seq            INTEGER NOT NULL,
+            UNIQUE (session_id, trial_index)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX trials_by_test ON trials (test, seq)")
+    conn.execute(
+        """
+        CREATE TABLE attempts (
+            trial_id    TEXT NOT NULL REFERENCES trials(trial_id),
+            attempt     INTEGER NOT NULL CHECK (attempt >= 1),
+            seed        INTEGER NOT NULL,
+            handle      TEXT,
+            sent_at     TEXT,
+            answered_at TEXT,
+            category    TEXT,
+            PRIMARY KEY (trial_id, attempt)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX attempts_by_trial ON attempts (trial_id)")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [m1_clips, m2_tests, m3_trials]
 
 
 def _is_busy(err: BaseException) -> bool:

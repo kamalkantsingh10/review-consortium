@@ -125,13 +125,13 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 
 ### `consortium open TEST [--dry-run] [--yes] [--ceiling USD] [--resume] [--study PATH]`
 
-Opens the registered Test `TEST`. In this version only `--dry-run` is available: before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request. Without `--dry-run`, `open` refuses with `run_unavailable: dispatch arrives in story 1.7` and does nothing. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used; `--yes` and `--resume` are accepted and ignored until stories 1.7-1.9.
+Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used (story 1.9). Without `--dry-run`, `--resume` is refused with `resume_unavailable` until story 1.8; with `--dry-run` it is ignored.
 
 - `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
 - **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card).
 - **Plans** every Session and Trial (see [Sessions and Trials](#sessions-and-trials)) and **renders every request** (see [Trial requests](#trial-requests)), one at a time, so a broken Instrument, card or missing Clip fails here rather than mid-Run. `requests sha256` is the SHA-256 of the canonical JSON of every request concatenated in plan order (Sessions in order, Trials by `trial_index`); the same seed and inputs give the same digest in any folder.
-- **Writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted, no cost is estimated.
-- On success, prints the counts to stdout and exits `0`. For a pilot Test with 64 Personas, 1 Model, 3 Repeats, `godspeed` over 4 Clips and `pairwise_alive` over the same 4 Clips:
+- **A dry run writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted, no cost is estimated.
+- On success, a dry run prints the counts to stdout and exits `0`. For a pilot Test with 64 Personas, 1 Model, 3 Repeats, `godspeed` over 4 Clips and `pairwise_alive` over the same 4 Clips:
 
   ```text
   test: pilot1 (pilot) dry run
@@ -159,7 +159,57 @@ Opens the registered Test `TEST`. In this version only `--dry-run` is available:
 | The registered file changed while it was being validated | `test_changed`, exit `1` |
 | Config changed since `push test` so the Test no longer passes its checks (for example `session.practice_clips` raised, a Model's `limits` tightened, an Instrument disabled or now pairwise with fewer than 2 targets) | `bad_practice`, `media_limit_exceeded`, `unknown_instrument` or `bad_pairing`, exit `1` |
 | `--ceiling` not a decimal amount greater than 0 | `bad_ceiling`, exit `1` |
-| No `--dry-run` | `run_unavailable: dispatch arrives in story 1.7`, exit `1`, nothing happens |
+| `--resume` without `--dry-run` | `resume_unavailable`, exit `1`, nothing happens (story 1.8) |
+
+#### Run
+
+`open TEST` without `--dry-run` does everything a dry run does (same checks, same plan, same requests, so the Run dispatches exactly the requests behind the dry run's `requests sha256`), then, in order:
+
+1. Refuses a `kind: main` Test (`protocol_lock_unavailable`, see above) and any Model whose provider has no adapter yet (`provider_unavailable`; only `fake` exists in this version). Nothing is written and no `board.lock` is created. If `board.db` is at an older layout version, the Run first takes the lease, migrates it, and releases the lease (a dry run never migrates).
+2. Refuses a Test that already has Trials in `board.db`: `test_already_open`, nothing written (resuming a Run arrives in story 1.8). A dry run of an open Test still works.
+3. Asks on stderr, before taking the lease (default no):
+
+   ```text
+   requests sha256: <64 lowercase hex digits>
+   Run N Trials on <providers>? [y/N]:
+   ```
+
+   `--yes` skips the question. Answering anything but yes, or end of input / Ctrl-C at the prompt: `not_confirmed`; stdin not a terminal and no `--yes`: `confirmation_required`. Either way no Trial is stored and no Archive line is written.
+4. Takes the exclusive lease on `board.lock` (`fcntl.flock`, held for the rest of the command; the OS releases it if the process dies). If another dispatching command holds it: `study_busy`, nothing written. Under the lease it re-checks that the Test has no Trials (`test_already_open`) and that the registered Test file's SHA-256, the requests digest and the providers are unchanged since the confirmation (else `test_changed`), nothing written.
+5. Prints the summary lines (as for a dry run, without `dry run`, ending with `requests sha256`) to stdout, stores every planned Trial as `planned` (attempt `0`) in one transaction, then sends every Trial through the engine.
+
+Per attempt, in this order: (1) `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)); (2) the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the Trial takes its terminal state: category `ok` gives `valid`, any other category `failed` (response validation arrives in story 1.10). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
+
+**State after a stopped Run (resume contract, story 1.8).** Every Trial is in one of these states, and resume handles each:
+
+- `planned` with `attempt` `0`: never dispatched; dispatch it.
+- `planned` with `attempt >= 1`: stopped between recording the attempt and marking it `sent`. Its attempt row has no `sent_at`, and the request may already be archived. Re-dispatch it with a new attempt (the old attempt number is never reused).
+- `sent` with a handle: submitted; collect it.
+- `sent` without a handle: stopped while submitting (the request is archived); re-dispatch it with a new attempt.
+- terminal (`valid`, `invalid`, `refused`, `failed`): done; it always has its response line.
+
+On success it adds the Trials by state to the summary and exits `0`, even when some Trials ended `failed`; then it also prints `warning: N Trials did not end valid` to stderr:
+
+```text
+test: pilot1 (pilot)
+...
+requests sha256: <64 lowercase hex digits>
+states: valid 3072
+```
+
+**Trial states.** `planned` (stored, not yet sent), `sent` (submitted; not necessarily answered), then one of the terminal states `valid`, `invalid`, `refused`, `failed`. Terminal states never change. This version produces only `valid` and `failed`.
+
+**Fake rater** (`provider: fake`). Deterministic, offline and free. It answers each Item from `random.Random(<attempt seed>)` in the request's Item order: a Likert Item `randint(1, points)`, a pairwise Item one of its options (a position, `A` or `B`), a free-text Item the fixed string `fake answer`. The raw answer is the canonical JSON `{item_id: value}`, which matches the Instrument's response schema. Usage is `{"input_tokens": 0, "output_tokens": 0}`, model build `fake-1`, category `ok`. Its handle carries the answer itself, so it can be collected after a restart.
+
+| Situation | Result |
+| --- | --- |
+| Pilot or screening Test on Fake Models, `--yes` | Every Trial `valid` at attempt `1`; one request and one response line per Trial; counts by state printed; exit `0` |
+| No `--yes`, answer `n` (or anything but yes) | `not_confirmed`, exit `1`; no Trial stored, no Archive written |
+| No `--yes`, stdin not a terminal | `confirmation_required`, exit `1`; no Trial stored, no Archive written |
+| Another dispatching command holds `board.lock` | `study_busy`, exit `1`; nothing written |
+| The Test already has Trials | `test_already_open`, exit `1`; nothing written |
+| `kind: main` Test | `protocol_lock_unavailable`, exit `1`; nothing written |
+| A Model of the Test uses a provider other than `fake` | `provider_unavailable`, exit `1`; nothing written |
 
 #### Sessions and Trials
 
@@ -209,7 +259,7 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
 | `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
 | `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
-| `test_changed` | `push test`, `open` | The Test file changed while it was being validated; nothing was registered or planned. |
+| `test_changed` | `push test`, `open` | The Test file changed while it was being validated, or (for a Run) the Test file, its requests or its providers changed between the confirmation and the lease; nothing was registered, planned or stored. |
 | `test_exists` | `push test`, `open` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
 | `unknown_clip` | `push test`, `open` | A target Clip ID is not in `board.db` (field `clips[i]`), or a Clip a registered Test uses is missing when its Trials are rendered. |
 | `bad_pairing` | `push test`, `open` | The pairing plan cannot be built: no target Clips, a pairwise Instrument with fewer than 2 targets, duplicate target Clip IDs, or a `session.pairing` other than `all_pairs`. |
@@ -220,7 +270,15 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `protocol_lock_unavailable` | `open` | The Test is `kind: main` (main Tests open only once the Protocol lock exists, Epic 4), or is otherwise registered as not openable. |
 | `bad_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0. |
 | `unknown_prompt_variant` | `open` | A Trial's Prompt variant is not defined by its Instrument (an internal consistency check). |
-| `run_unavailable` | `open` | `open` without `--dry-run`; dispatch arrives in story 1.7. |
+| `provider_unavailable` | `open` | A Model of the Test uses a provider with no adapter yet (only `fake` exists in this version). |
+| `study_busy` | `open` | Another dispatching command holds the `board.lock` lease of this Study. |
+| `test_already_open` | `open` | The Test already has Trials in `board.db`; it cannot be opened again. |
+| `not_confirmed` | `open` | The Run was declined at the confirmation prompt; nothing was stored or sent. |
+| `confirmation_required` | `open` | No `--yes` and stdin is not a terminal, so the Run cannot be confirmed; nothing was stored or sent. |
+| `resume_unavailable` | `open` | `--resume` without `--dry-run`; resume arrives in story 1.8. |
+| `run_failed` | `open` | The Run stopped on an unexpected error (`<type>: <message>`); see the resume contract under [Run](#run). |
+| `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results). The Run stopped. |
+| `bad_concurrency` | `open` | The engine was given a concurrency below 1 (an internal check; `study.yaml` already requires at least 1). |
 | `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
 
 ## Study folder layout
@@ -237,9 +295,9 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
   clips/<clip_id>.mp4  Canonicalized, metadata-free Clips.                          (push clip)
   blinding_key.csv     The only place Conditions exist.                             (push clip)
   board.db             All mutable Study state (SQLite).                            (push clip)
-  board.lock           Exclusive lease held by a dispatching command.               (arrives in story 1.7)
-  archive/requests.jsonl   Append-only rendered requests.                           (arrives in story 1.7)
-  archive/responses.jsonl  Append-only raw responses.                               (arrives in story 1.7)
+  board.lock           Exclusive lease held by a dispatching command.               (open)
+  archive/requests.jsonl   Append-only rendered requests.                           (open)
+  archive/responses.jsonl  Append-only raw responses.                               (open)
   exports/             Export CSVs and reports; leak-report.csv from push clip.     (exports in story 1.12)
   protocol.lock        Hashes of every file that affects the data.                  (arrives in story 4.1)
 ```
@@ -271,7 +329,7 @@ One canonical MP4 per Clip, written by `push clip`. The file name is the Clip ID
 
 ### `board.db`
 
-SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `2`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
+SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `3`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
 
 | Column | Meaning |
 | --- | --- |
@@ -297,9 +355,26 @@ Table `tests` (version 2), one row per registered Test:
 
 Table `test_clips` (version 2), one row per Test and Clip it uses: `test`, `clip_id`, `role` (`target` or `practice`; every Practice Clip listed in `practice:` is recorded, used or not).
 
+Table `trials` (version 3), one row per planned Trial, written by `open`: every Trial field (`trial_id` primary key, `test`, `session_id`, `trial_index`, `instrument`, `clip_ids` as a canonical JSON list in presentation order, `pair_id`, `position`, `prompt_variant`, `order_seed`, `repeat`, `agent_id`, `persona_id`, `model_id`), plus `state` (see [Trial states](#run)), `attempt` (`0` until first dispatched, then the latest attempt number) and `seq` (plan order).
+
+Table `attempts` (version 3), one row per `(trial_id, attempt)` (primary key): `seed` (the attempt's derived Model seed), `handle` (the Rater's handle as canonical JSON, once submitted), `sent_at`, `answered_at` (UTC ISO 8601 with milliseconds and `Z`) and `category` (the Rater's result category, `ok` or a snake_case reason). Indexed by `trial_id`.
+
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
 Read-only commands (`open --dry-run`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
+
+### `board.lock`
+
+An empty file; `open` (a dispatching command) holds an exclusive `fcntl.flock` on it for the whole command. A second dispatcher refuses with `study_busy`. The lock is released by the OS when the holding process ends, so a leftover file never blocks.
+
+### `archive/requests.jsonl`, `archive/responses.jsonl`
+
+Append-only; never rewritten. One canonical JSON object per line (sorted keys, UTF-8, no whitespace, LF), keyed by `trial_id` + `attempt`; each line is flushed and fsynced before the Run moves on. A request line is written before its Trial is marked `sent`; a response line before the Trial changes state. The `archive/` directory is fsynced when it or a file in it is first created. A crash during an append can leave an unterminated final line: readers ignore it, and the next append first ends it with a newline so it never merges into a new record. Timestamps (`ts`, and `sent_at`/`answered_at` in `board.db`) are UTC ISO 8601 with milliseconds and `Z`.
+
+- **Request:** `{"attempt", "model_id", "request", "request_sha256", "seed", "trial_id", "ts"}`. `request` is the rendered request object (see [Trial requests](#trial-requests)); `request_sha256` is the SHA-256 of its canonical JSON; `seed` the attempt's Model seed; `ts` UTC ISO 8601 with milliseconds and `Z`.
+- **Response:** `{"attempt", "category", "model_build", "raw", "request_sha256", "trial_id", "ts", "usage"}`. `request_sha256` repeats that of the attempt's request line; `raw` is the Model's raw text, `usage` `{"input_tokens", "output_tokens"}`, `model_build` the provider-reported build (or `null`), `category` `ok` or a snake_case reason.
+
+Media appear only as Clip ID + SHA-256. The Archive never holds a Condition, a source file name or a provider file handle.
 
 ### `blinding_key.csv`
 
@@ -368,7 +443,7 @@ Every sentence and phrase must be a single line (no line break of any kind, incl
 
 ### Seeds
 
-`study.yaml` `seed` is the only seed. Every other seed is derived as `int(sha256("<seed>:<purpose>:<key>").hexdigest()[:8], 16) & 0x7FFFFFFF` (the first 8 hex digits of the SHA-256, masked to 31 bits) and used only through Python's `random.Random(seed)`. Persona quotas use purpose `personas` with the attribute name as key (for example `1:personas:gender`). Trial order uses purpose `order` with the Session ID as key (for example `1:order:pilot1/p12-m1/r2`).
+`study.yaml` `seed` is the only seed. Every other seed is derived as `int(sha256("<seed>:<purpose>:<key>").hexdigest()[:8], 16) & 0x7FFFFFFF` (the first 8 hex digits of the SHA-256, masked to 31 bits) and used only through Python's `random.Random(seed)`. Persona quotas use purpose `personas` with the attribute name as key (for example `1:personas:gender`). Trial order uses purpose `order` with the Session ID as key (for example `1:order:pilot1/p12-m1/r2`). Each attempt of a Trial uses purpose `model` with key `<session_id>:<trial_index>:<attempt>` (for example `1:model:pilot1/p12-m1/r2:7:1`); the Fake rater answers from it.
 
 ### `tests/<name>.yaml`
 

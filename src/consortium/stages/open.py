@@ -1,31 +1,52 @@
-"""Use case: open a registered Test. Story 1.6 delivers ``--dry-run`` only.
+"""Use case: open a registered Test: ``--dry-run`` (story 1.6) or a Run (story 1.7).
 
-A dry run loads the Study config, the registered Test, its Instruments, the
-Persona Panel and the Clip hashes; plans every Session and Trial; renders every
-request (so a broken Instrument or missing Clip fails here, not mid-Run); and
-returns counts plus a SHA-256 digest of every request. It writes no Study data:
-``board.db`` is opened read-only and no Study file is created or changed.
-Dispatch arrives in story 1.7.
+Both load the Study config, the registered Test, its Instruments, the Persona
+Panel and the Clip hashes; plan every Session and Trial; and render every
+request (so a broken Instrument or missing Clip fails before anything is sent).
+
+A dry run returns counts plus a SHA-256 digest of every request and writes no
+Study data (``board.db`` is opened read-only).
+
+A Run refuses a Test that already has Trials, asks for confirmation (unless
+``yes``) showing the Trial count and requests digest, then takes the
+``board.lock`` lease, re-checks that the Test is still unopened and that the
+registered Test file and the requests digest are unchanged, announces the
+summary, stores every planned Trial as ``planned`` in one transaction and sends
+them all through ``engine.dispatch``. Every ``board.db`` write and Archive
+append happens on the single writer task. A Run on an older ``board.db`` layout
+migrates it first, under the lease.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import hashlib
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from consortium.board.clips import list_clips
 from consortium.board.db import read_only
+from consortium.board.lease import acquire_lease
 from consortium.board.tests import get_test
+from consortium.board.trials import count_trials, insert_plan, state_counts
+from consortium.board.writer import Spy, migrate, start_writer
 from consortium.config.load import PERSONAS_DIR, load_instruments, load_personas, load_study
 from consortium.config.load import load_test as load_test_file
+from consortium.config.models import StudyConfig
 from consortium.core.errors import ConsortiumError
-from consortium.core.plan import Plan, plan_test
+from consortium.core.plan import Plan, Trial, plan_test
 from consortium.core.render import TrialRequest, canonical_json, practice_for, render
 from consortium.core.test_checks import check_media_limits, check_plan
+from consortium.engine.dispatch import dispatch
+from consortium.raters.base import Rater
+from consortium.raters.fake import FakeRater
+
+Confirm = Callable[[str], bool]
+Announce = Callable[[list[str]], None]
 
 
 @dataclass(frozen=True)
@@ -40,6 +61,14 @@ class OpenSummary:
     by_instrument: dict[str, int]
     by_type: dict[str, int]  # single / pairwise
     requests_sha256: str  # over the concatenated canonical JSON of every request, plan order
+    states: dict[str, int] | None = None  # Trials by state after a Run; None for a dry run
+
+    @property
+    def not_valid(self) -> int:
+        """Trials that did not end ``valid`` after a Run (0 for a dry run)."""
+        if self.states is None:
+            return 0
+        return self.trials - self.states.get("valid", 0)
 
     def lines(self) -> list[str]:
         """The summary as printed by ``consortium open``."""
@@ -60,6 +89,7 @@ class OpenSummary:
             f"by instrument: {fmt(self.by_instrument)}",
             f"by type: {fmt(self.by_type)}",
             f"requests sha256: {self.requests_sha256}",
+            *([f"states: {fmt(self.states)}"] if self.states is not None else []),
         ]
 
 
@@ -128,26 +158,153 @@ def open_test(
     yes: bool = False,
     ceiling: str | None = None,
     resume: bool = False,
+    confirm: Confirm | None = None,
+    announce: Announce | None = None,
+    writer_spy: Spy | None = None,
 ) -> OpenSummary:
-    """Plan and render every Trial of the registered Test ``test`` and return the counts.
+    """Plan and render every Trial of the registered Test ``test``; unless ``dry_run``, run it.
 
-    Only ``dry_run=True`` is available (story 1.6); otherwise ``run_unavailable``.
-    ``ceiling`` is validated (``bad_ceiling``); ``yes`` and ``resume`` are ignored
-    until stories 1.7-1.9. Raises ``unknown_test`` (not registered, or no
-    ``board.db``), ``protocol_lock_unavailable`` (before any planning),
-    ``test_exists`` (the registered file is missing or was edited),
-    ``test_changed``, ``board_unreadable``, ``panel_missing`` / ``panel_invalid``,
-    ``unknown_clip``, ``bad_pairing``, ``bad_practice``, ``media_limit_exceeded``,
-    ``unknown_instrument`` and any config error.
+    ``ceiling`` is validated (``bad_ceiling``) but not yet used (story 1.9);
+    ``resume`` is refused with ``resume_unavailable`` for a Run (story 1.8) and
+    ignored for a dry run. Planning raises
+    ``unknown_test`` (not registered, or no ``board.db``), ``protocol_lock_unavailable``
+    (before any planning), ``test_exists`` (the registered file is missing or was
+    edited), ``test_changed``, ``board_unreadable``, ``panel_missing`` /
+    ``panel_invalid``, ``unknown_clip``, ``bad_pairing``, ``bad_practice``,
+    ``media_limit_exceeded``, ``unknown_instrument`` and any config error.
+
+    A Run additionally raises ``provider_unavailable`` (a Model's provider has no
+    adapter yet), ``study_busy`` (another dispatcher holds ``board.lock``),
+    ``test_already_open`` (the Test already has Trials), ``confirmation_required``
+    (``yes`` is false and no ``confirm`` callback is given) and ``not_confirmed``
+    (``confirm(prompt)`` returned false), and ``test_changed`` (the registered
+    file or the requests changed between the confirmation and the lease); all of
+    these write no Trial and no Archive line. Once dispatch starts, an adapter
+    failure raises its ``ConsortiumError`` or ``run_failed``. ``announce`` gets the
+    summary lines just before dispatch; ``writer_spy`` observes writer operations.
     """
     parse_ceiling(ceiling)
-    if not dry_run:
-        raise ConsortiumError("run_unavailable", "dispatch arrives in story 1.7")
-    plan, requests, instrument_order = plan_and_render(study_dir, test)
+    study = Path(study_dir)
+    if dry_run:
+        _, plan, requests, instrument_order, _, _ = _plan_and_render(study, test)
+        digest = hashlib.sha256()
+        for request in requests:  # rendered lazily, one at a time
+            digest.update(canonical_json(request))
+        return _summarize(plan, instrument_order, dry_run, digest.hexdigest())
+    if resume:
+        raise ConsortiumError("resume_unavailable", "--resume arrives in story 1.8")
+    try:
+        prepared = _plan_and_render(study, test)
+    except ConsortiumError as err:
+        if err.code != "board_version_mismatch":
+            raise
+        with acquire_lease(study):  # a Run writes board.db, so it migrates an older layout
+            migrate(study)
+        prepared = _plan_and_render(study, test)
+    return _run(
+        study, test, prepared, yes=yes, confirm=confirm, announce=announce,
+        writer_spy=writer_spy,
+    )
+
+
+def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
+    """``model_id -> Rater``; one Rater per provider. Only ``fake`` exists so far."""
+    by_provider: dict[str, Rater] = {}
+    out: dict[str, Rater] = {}
+    for model_id in model_ids:
+        provider = cfg.model_by_id(model_id).provider
+        if provider not in by_provider:
+            if provider != "fake":
+                raise ConsortiumError(
+                    "provider_unavailable",
+                    f"model {model_id}: provider {provider!r} has no adapter yet (Epic 2)",
+                )
+            by_provider[provider] = FakeRater()
+        out[model_id] = by_provider[provider]
+    return out
+
+
+def _render_all(
+    plan: Plan, requests: Iterator[TrialRequest]
+) -> tuple[list[tuple[Trial, TrialRequest]], str]:
     digest = hashlib.sha256()
-    for request in requests:  # rendered lazily, one at a time
+    pairs: list[tuple[Trial, TrialRequest]] = []
+    for trial, request in zip(plan.trials, requests, strict=True):
         digest.update(canonical_json(request))
-    return _summarize(plan, instrument_order, dry_run, digest.hexdigest())
+        pairs.append((trial, request))
+    return pairs, digest.hexdigest()
+
+
+def _refuse_if_open(study: Path, test: str) -> None:
+    if read_only(study, lambda conn: count_trials(conn, test)):
+        raise ConsortiumError("test_already_open", f"Test {test!r} already has Trials")
+
+
+def _run(
+    study: Path,
+    test: str,
+    prepared: _Prepared,
+    *,
+    yes: bool,
+    confirm: Confirm | None,
+    announce: Announce | None,
+    writer_spy: Spy | None,
+) -> OpenSummary:
+    cfg, plan, requests, instrument_order, rel, test_sha256 = prepared
+    pairs, digest = _render_all(plan, requests)
+    model_ids = list(dict.fromkeys(s.model_id for s in plan.sessions))
+    raters = raters_for(cfg, model_ids)
+    providers = list(dict.fromkeys(r.provider for r in raters.values()))
+    _refuse_if_open(study, test)
+    if not yes:
+        if confirm is None:
+            raise ConsortiumError(
+                "confirmation_required", "stdin is not a terminal; pass --yes to confirm"
+            )
+        prompt = f"requests sha256: {digest}\nRun {len(pairs)} Trials on {', '.join(providers)}?"
+        if not confirm(prompt):
+            raise ConsortiumError("not_confirmed", "Run not confirmed; nothing was sent")
+
+    with acquire_lease(study):
+        _refuse_if_open(study, test)
+        changed = ConsortiumError(
+            "test_changed", "the Test or its requests changed since the confirmation", path=rel
+        )
+        try:
+            if hashlib.sha256((study / rel).read_bytes()).hexdigest() != test_sha256:
+                raise changed
+        except OSError as err:
+            raise changed from err
+        cfg, plan2, requests2, _, _, sha_now = _plan_and_render(study, test)
+        _, digest_now = _render_all(plan2, requests2)
+        raters_now = raters_for(cfg, model_ids)
+        if (
+            sha_now != test_sha256
+            or digest_now != digest
+            or [r.provider for r in raters_now.values()] != [r.provider for r in raters.values()]
+        ):
+            raise changed
+        summary = _summarize(plan, instrument_order, False, digest)
+        if announce is not None:
+            announce(summary.lines())
+        states = asyncio.run(_dispatch_all(study, cfg, plan, pairs, raters, writer_spy))
+    return dataclasses.replace(summary, states=states)
+
+
+async def _dispatch_all(
+    study: Path,
+    cfg: StudyConfig,
+    plan: Plan,
+    pairs: list[tuple[Trial, TrialRequest]],
+    raters: dict[str, Rater],
+    writer_spy: Spy | None,
+) -> dict[str, int]:
+    async with start_writer(study, spy=writer_spy) as writer:
+        await writer.do("insert_plan", lambda conn: insert_plan(conn, plan.test, plan.trials))
+        await dispatch(
+            study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency
+        )
+        return await writer.do("state_counts", lambda conn: state_counts(conn, plan.test))
 
 
 def _read_registration(study: Path, test: str) -> tuple[dict, dict[str, dict]]:
@@ -172,7 +329,15 @@ def plan_and_render(
     Every check runs before the Plan is returned; rendering can still raise
     ``unknown_clip`` while the iterator is consumed.
     """
-    study = Path(study_dir)
+    _, plan, requests, instrument_order, _, _ = _plan_and_render(Path(study_dir), test)
+    return plan, requests, instrument_order
+
+
+# cfg, plan, lazily rendered requests, Instrument order, registered path, registered SHA-256
+_Prepared = tuple[StudyConfig, Plan, Iterator[TrialRequest], list[str], str, str]
+
+
+def _plan_and_render(study: Path, test: str) -> _Prepared:
     cfg = load_study(study)
     row, clip_rows = _read_registration(study, test)
     if row["kind"] == "main":
@@ -245,4 +410,4 @@ def plan_and_render(
         )
         for trial in plan.trials
     )
-    return plan, requests, list(test_cfg.instruments)
+    return cfg, plan, requests, list(test_cfg.instruments), rel, row["sha256"]

@@ -2,7 +2,8 @@
 title: 'Story 1.7 — Run a Test with the Fake rater'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'a516d8bfb4fdbc8c50643c6b775a75740ce92a29'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -51,6 +52,10 @@ context:
 
 ## Code Map
 
+- **As built by Story 1.6 (commit a516d8b); build on these, don't redo them:**
+  - `stages/open.plan_and_render` returns `(plan, requests_generator, instrument_order)`, and requests render lazily in plan order. `open_test` streams a `requests sha256:` digest over the canonical JSON and prints it. The real Run must dispatch exactly the requests that produce that digest.
+  - `open` already re-runs the Test checks against the current config (`core/test_checks.py`), parses `--ceiling` (`bad_ceiling`), and refuses main Tests with `protocol_lock_unavailable`.
+  - `board.db.read_only(study_dir, fn)` is the read-only path; `connect(study_dir)` is the writer path. SQLite errors map to `board_unreadable` or `board_busy`.
 - `core/plan.py`, `core/render.py` (1.6) -- `Trial`, `render`, `canonical_json`.
 - `stages/open.py` (1.6) -- replace `run_unavailable` with the Run.
 - `board/db.py` (1.4) -- `MIGRATIONS` (append only).
@@ -58,17 +63,17 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/board/db.py` -- append one migration: `trials` (all `Trial` fields, `test`, `state`, `attempt`) and `attempts` (`trial_id`, `attempt`, `seed`, `handle`, `sent_at`, `answered_at`, `category`; PK `(trial_id, attempt)`).
-- [ ] `src/consortium/board/trials.py` -- insert plan, load Trials, next attempt, mark sent, set handle, set state.
-- [ ] `src/consortium/board/writer.py` -- writer task over an `asyncio.Queue`; owns the connection and Archive appends.
-- [ ] `src/consortium/board/lease.py` -- `acquire_lease(study_dir)`.
-- [ ] `src/consortium/archive/jsonl.py` -- `append_request`, `append_response` (append + flush + fsync).
-- [ ] `src/consortium/raters/base.py` -- `Rater` Protocol, `MediaRef`, `Handle` (JSON-serialisable, stored as text in `attempts.handle`), `RaterResult(raw, usage, model_build, category)`, and `RaterCall(trial_id, attempt, seed, request, media)` as `submit`'s input.
-- [ ] `src/consortium/raters/fake.py` -- `FakeRater`.
-- [ ] `src/consortium/engine/dispatch.py` -- `async dispatch(study_dir, trials, rater_by_model, *, writer)`, `trials` = list of `(Trial, TrialRequest)`.
-- [ ] `src/consortium/stages/open.py`, `src/consortium/cli.py` -- Run flow; confirmation prompt; a `provider → Rater` factory that knows only `fake` (other providers → `provider_unavailable`).
-- [ ] `docs/INTERFACE.md` -- `open`, `--yes`, `board.lock`, Archive record formats, Trial states.
-- [ ] `tests/test_dispatch.py`, `tests/test_lease.py`, `tests/test_fake.py` -- every matrix row; per-attempt order via a writer-queue spy.
+- [x] `src/consortium/board/db.py` -- append one migration: `trials` (all `Trial` fields, `test`, `state`, `attempt`) and `attempts` (`trial_id`, `attempt`, `seed`, `handle`, `sent_at`, `answered_at`, `category`; PK `(trial_id, attempt)`).
+- [x] `src/consortium/board/trials.py` -- insert plan, load Trials, next attempt, mark sent, set handle, set state.
+- [x] `src/consortium/board/writer.py` -- writer task over an `asyncio.Queue`; owns the connection and Archive appends.
+- [x] `src/consortium/board/lease.py` -- `acquire_lease(study_dir)`.
+- [x] `src/consortium/archive/jsonl.py` -- `append_request`, `append_response` (append + flush + fsync).
+- [x] `src/consortium/raters/base.py` -- `Rater` Protocol, `MediaRef`, `Handle` (JSON-serialisable, stored as text in `attempts.handle`), `RaterResult(raw, usage, model_build, category)`, and `RaterCall(trial_id, attempt, seed, request, media)` as `submit`'s input.
+- [x] `src/consortium/raters/fake.py` -- `FakeRater`.
+- [x] `src/consortium/engine/dispatch.py` -- `async dispatch(study_dir, trials, rater_by_model, *, writer)`, `trials` = list of `(Trial, TrialRequest)`.
+- [x] `src/consortium/stages/open.py`, `src/consortium/cli.py` -- Run flow; confirmation prompt; a `provider → Rater` factory that knows only `fake` (other providers → `provider_unavailable`).
+- [x] `docs/INTERFACE.md` -- `open`, `--yes`, `board.lock`, Archive record formats, Trial states.
+- [x] `tests/test_dispatch.py`, `tests/test_lease.py`, `tests/test_fake.py` -- every matrix row; per-attempt order via a writer-queue spy.
 
 **Acceptance Criteria:**
 - Given a completed Fake Run, when the Archive and `board.db` are compared, then every attempt has exactly one request line and one response line, and every request line precedes its Trial's `sent` write.
@@ -80,6 +85,30 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC, VG | TaskGroup ExceptionGroup escapes the CLI (traceback, not `code: message`); failure path untested | high | patch (unwrap + run_failed + test) |
+| 2 | BH | Cancel between append_request and mark_sent leaves an undocumented state | medium | patch (document for 1.8) |
+| 3 | EC | Handle lost if cancelled after submit, before set_handle | medium | patch (shield) |
+| 4 | EC, BH | Wrong-length adapter result, cached failed prepare, concurrency < 1, missing Rater | low | patch |
+| 5 | BH, EC, VG | A Run can't migrate an older board.db | medium | patch (migrate under the lease) |
+| 6 | BH, EC | Prompt held while leased; planning outside the lease; digest not shown at confirm | medium | patch |
+| 7 | BH, EC | EOF/Ctrl-C prints "Aborted!" | low | patch (not_confirmed) |
+| 8 | BH | Exit status with failed Trials undefined | low | patch (warning, exit 0) |
+| 9 | EC | --dry-run --resume now refused | low | patch |
+| 10 | BH, EC | Partial last Archive line merges; archive dir not fsynced | medium | patch |
+| 11 | BH | Two timestamp precisions; non-canonical clip_ids; response not linked to request | low | patch |
+| 12 | BH | No attempts index | low | patch |
+| 13 | VG | Response raw never checked against request and seed | medium | patch (test) |
+| 14 | BH | Untested: provider_unavailable lock, --yes with TTY, dry run on an open Test | low | patch (tests) |
+| 15 | BH | Foreign keys not enforced | false | connect() sets PRAGMA foreign_keys=ON (story 1.5) |
+| 16 | EC | Empty plan reopenable | false | open's Test checks require ≥1 target and Personas/Models, so a plan can't be empty |
+| 17 | EC | Fake likert with points None | false | The schema requires points on Likert items |
+| 18 | BH | Run holds all requests in memory | low | Rejected: fine at pilot scale; revisit with batch adapters |
+| 19 | EC | asyncio.run inside a running loop | low | Rejected: CLI-only entry point |
+| 20 | BH | writer_spy public hook; brittle substring test | low | Rejected: test-only, harmless |
+| 21 | BH | Story diff missing the spec | false | Planning files are intentionally excluded from the code diff |
 
 ## Design Notes
 

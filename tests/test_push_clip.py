@@ -176,7 +176,7 @@ def test_two_pushes_board_shape(study: Path, media: dict[str, Path]) -> None:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        assert sorted(tables) == ["clips", "test_clips", "tests"]
+        assert sorted(tables) == ["attempts", "clips", "test_clips", "tests", "trials"]
         assert conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 2
     finally:
         conn.close()
