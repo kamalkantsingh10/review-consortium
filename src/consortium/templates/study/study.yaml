@@ -6,7 +6,9 @@ schema_version: 1
 seed: 1
 
 # Instruments available to Tests: built-in names, or user Instruments in instruments/<name>.yaml.
-instruments: [godspeed, pairwise_alive, presence]
+# perception_cues (built-in: "Is the robot moving?", "Is there speech?") is for low-level
+# checks in a kind: screening Test (consortium screen models).
+instruments: [godspeed, pairwise_alive, presence, perception_cues]
 
 # Models are keyed by id (m1, m2, ...), never by list position. Pin exact versions.
 models:
@@ -28,6 +30,7 @@ models:
       refusal_rate: 0       # 0-1: share of attempts that are refused (Trial ends refused)
       fatal_rate: 0         # 0-1: share of attempts that fail fatally (Trial ends failed)
       fidelity: random      # random | faithful | unfaithful: how keyed self-report Items are answered (screen personas)
+      perception: random    # random | faithful | unfaithful: how Items about Clips are answered (screen models)
   # A Gemini Model (uncomment to use; the key is read from GEMINI_API_KEY, never from here).
   # It also needs a matching prices.yaml entry, with media_tokens_per_s for its
   # media_resolution and fps (per-frame tokens x fps + 32 audio tokens/s), e.g. for low at 1 fps:
@@ -74,6 +77,7 @@ concurrency: 4
 # Required; there are no code defaults.
 thresholds:
   persona_fidelity_min: 0.8
+  perception_min: 0.8       # screen models: a Model passes an Instrument at this pass ratio
   invalid_rate_max: 0.05
   leak_tolerance:           # resolution and fps must match exactly
     duration_s: 1.0

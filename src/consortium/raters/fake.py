@@ -34,16 +34,29 @@ request's Persona card is answered ``points`` when the pole is ``high`` XOR the 
 is reversed and ``1`` otherwise (``faithful``), or the opposite (``unfaithful``).
 Every other Item is answered at random as above; the random stream is drawn for
 every Item either way, so unkeyed answers do not depend on the mode.
+
+Perception (story 3.2): ``perception`` is ``random`` (default, unchanged), ``faithful``
+or ``unfaithful``. Each Clip has a hidden latent per Item, ``fake_latent(clip_sha256,
+item_id)`` in ``[0, 1)`` (from ``derive_seed(0, "fake_latent", "<sha>:<item>")``, so the
+same for every Study). Only in a perception screening request (the neutral Persona card
+``core.perception.NEUTRAL_CARD``; pilot and main Runs are answered as with ``random``)
+with target Clips, a faithful rater answers a Likert
+Item about one Clip ``1 + floor(latent * points)`` and a pairwise Item with the option of
+the Clip whose latent is higher; an unfaithful rater uses ``1 - latent`` instead (capped
+at ``points``). Keyed self-report Items and Items of clip-less requests are untouched; the
+random stream is still drawn for every Item.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
+from consortium.core.perception import NEUTRAL_CARD
 from consortium.core.render import ClipRef, TrialRequest, canonical_json
 from consortium.core.seeds import derive_seed
 from consortium.raters.base import Category, Handle, MediaRef, RaterCall, RaterResult
@@ -67,6 +80,23 @@ REFUSED_RAW = "simulated refusal: the request was blocked for safety reasons"
 FATAL_RAW = "simulated fatal error: 400 INVALID_ARGUMENT"
 
 Fidelity = Literal["random", "faithful", "unfaithful"]
+Perception = Literal["random", "faithful", "unfaithful"]
+LATENT_PURPOSE = "fake_latent"
+
+
+def fake_latent(clip_sha256: str, item_id: str) -> float:
+    """The hidden latent of a Clip for an Item, in ``[0, 1)`` (deterministic, Study-free)."""
+    return random.Random(derive_seed(0, LATENT_PURPOSE, f"{clip_sha256}:{item_id}")).random()
+
+
+def perceived(latent: float, perception: Perception) -> float:
+    """The latent a ``perception`` rater answers from: ``latent``, or ``1 - latent``."""
+    return 1.0 - latent if perception == "unfaithful" else latent
+
+
+def likert_from_latent(latent: float, points: int) -> int:
+    """``1 + floor(latent * points)``, capped at ``points``."""
+    return min(points, 1 + math.floor(latent * points))
 
 
 @dataclass(frozen=True)
@@ -132,12 +162,13 @@ def fake_invalid_answer(
     attempt: int,
     fidelity: Fidelity = "random",
     cues: FidelityCues | None = None,
+    perception: Perception = "random",
 ) -> str:
     """An invalid raw answer, of kind ``INVALID_KINDS[(attempt - 1) % 3]``."""
     kind = INVALID_KINDS[(attempt - 1) % len(INVALID_KINDS)]
     if kind == "not_json":
         return NOT_JSON_ANSWER
-    answer = json.loads(fake_answer(request, seed, fidelity, cues))
+    answer = json.loads(fake_answer(request, seed, fidelity, cues, perception))
     first = request.items[0]
     if kind == "missing_item":
         del answer[first.id]
@@ -155,9 +186,13 @@ def fake_answer(
     seed: int,
     fidelity: Fidelity = "random",
     cues: FidelityCues | None = None,
+    perception: Perception = "random",
 ) -> str:
     """The raw answer the Fake rater gives to ``request`` with ``seed``."""
     rng = random.Random(seed)
+    # Only perception screening requests (the neutral card): pilot and main Runs unchanged.
+    screening = perception != "random" and request.persona_card == NEUTRAL_CARD
+    clips = request.clips if screening else ()
     poles = card_poles(request.persona_card, cues) if fidelity != "random" and cues else {}
     answer: dict[str, int | str] = {}
     for item in request.items:
@@ -170,8 +205,15 @@ def fake_answer(
                 if fidelity == "unfaithful":
                     high = not high
                 answer[item.id] = points if high else 1
+            elif len(clips) == 1:
+                latent = perceived(fake_latent(clips[0].sha256, item.id), perception)
+                answer[item.id] = likert_from_latent(latent, points)
         elif item.type == "pairwise":
-            answer[item.id] = rng.choice(list(item.options or ("A", "B")))
+            options = list(item.options or ("A", "B"))
+            answer[item.id] = rng.choice(options)
+            if len(clips) == 2:
+                a, b = (perceived(fake_latent(c.sha256, item.id), perception) for c in clips)
+                answer[item.id] = options[0] if a > b else options[1]
         else:
             answer[item.id] = FREE_TEXT_ANSWER
     return canonical_json(answer).decode("utf-8")
@@ -193,8 +235,10 @@ class FakeRater:
         fatal_rate: float = 0.0,
         fidelity: Fidelity = "random",
         cues: FidelityCues | None = None,
+        perception: Perception = "random",
     ) -> None:
         self.fidelity = fidelity
+        self.perception = perception
         self.cues = cues
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
@@ -211,9 +255,9 @@ class FakeRater:
         """The raw answer to ``call`` (valid, or invalid at ``invalid_rate``)."""
         if is_invalid_attempt(call.seed, self.invalid_rate):
             return fake_invalid_answer(
-                call.request, call.seed, call.attempt, self.fidelity, self.cues
+                call.request, call.seed, call.attempt, self.fidelity, self.cues, self.perception
             )
-        return fake_answer(call.request, call.seed, self.fidelity, self.cues)
+        return fake_answer(call.request, call.seed, self.fidelity, self.cues, self.perception)
 
     async def prepare(self, clip: ClipRef) -> MediaRef:
         return MediaRef(clip.clip_id, clip.sha256, f"fake:{clip.clip_id}")

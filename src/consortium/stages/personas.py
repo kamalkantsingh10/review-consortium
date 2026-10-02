@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 from consortium.board.db import DB_FILE, read_only
-from consortium.board.trials import any_trials
+from consortium.board.trials import any_panel_trials
 from consortium.config.load import (
     PERSONAS_DIR,
     card_wording_sha256,
@@ -27,6 +27,7 @@ from consortium.config.load import (
 )
 from consortium.config.models import StudyConfig
 from consortium.core.errors import ConsortiumError
+from consortium.core.perception import NEUTRAL_PERSONA_ID
 from consortium.core.personas import (
     GENERATOR_VERSION,
     Persona,
@@ -158,9 +159,12 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
 
 
 def _refuse_if_in_use(study_dir: Path) -> None:
-    """``panel_in_use`` when ``board.db`` holds any Trial (any layout version, never
-    migrated, no lease); ``board_unreadable`` / ``board_busy`` fail closed."""
-    if read_only(study_dir, any_trials, allow_older=True):
+    """``panel_in_use`` when ``board.db`` holds any Trial of a Panel Persona, which includes
+    every fidelity screening Trial (any layout version, never migrated, no lease);
+    perception screening's neutral Persona ``p0`` does not count (story 3.2).
+    ``board_unreadable`` / ``board_busy`` fail closed."""
+    if read_only(study_dir, lambda conn: any_panel_trials(conn, NEUTRAL_PERSONA_ID),
+                 allow_older=True):
         raise ConsortiumError(
             "panel_in_use",
             "board.db already holds Trials that reference this Panel; regenerating would "

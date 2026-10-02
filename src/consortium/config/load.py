@@ -306,11 +306,88 @@ def load_test(
         problem = instrument.answer_problem(example.answer)
         if problem:
             raise _invalid(rel, f"{where}.answer.{problem}")
+    _check_checks(test, instruments, rel)
 
     for name, instrument in instruments.items():
         if instrument.draft:
             log.warning("draft_instrument: %s", name)
     return test
+
+
+def _check_checks(test: TestConfig, instruments: dict[str, InstrumentDef], rel: str) -> None:
+    """Perception checks (story 3.2; ``kind: screening`` only, enforced by the model).
+
+    The Instrument is one of the Test's and the Item one of its Items (a pairwise Item for
+    a pairwise Instrument); the Clips are among the Test's ``clips``. A pairwise Instrument
+    needs 2 Clips; a pair check (pairwise, or a single-Clip Instrument given 2 Clips) needs
+    ``expected`` to be one of its Clips (and, single-Clip, a Likert Item of at least 3
+    points, compared strictly); a low-level check (1 Clip) needs a non-free-text Item and
+    ``expected`` a valid answer to it. The same
+    check (instrument, item, Clip set) may appear only once: a repeat is a duplicate, a
+    different ``expected`` a contradiction. Else ``config_invalid``.
+    """
+    targets = set(test.clips)
+    seen: dict[tuple, tuple[int, Any]] = {}
+    for i, check in enumerate(test.checks):
+        where = f"checks.{i}"
+        instrument = instruments.get(check.instrument)
+        if instrument is None:
+            raise _invalid(
+                rel, f"{where}.instrument: {check.instrument!r} is not one of the Test's "
+                "instruments",
+            )
+        item = next((it for it in instrument.items if it.id == check.item), None)
+        if item is None:
+            raise _invalid(
+                rel, f"{where}.item: {check.item!r} is not an item of {check.instrument}"
+            )
+        if instrument.pairwise and item.type != "pairwise":
+            raise _invalid(
+                rel, f"{where}.item: pairwise Instrument {check.instrument} needs a pairwise "
+                f"item, not {item.type}",
+            )
+        for j, clip in enumerate(check.clips):
+            if clip not in targets:
+                raise _invalid(
+                    rel, f"{where}.clips.{j}: {clip} is not one of the Test's clips"
+                )
+        if instrument.pairwise and len(check.clips) != 2:
+            raise _invalid(
+                rel, f"{where}.clips: pairwise Instrument {check.instrument} needs 2 clips"
+            )
+        if len(check.clips) == 2:
+            if check.expected not in check.clips:
+                raise _invalid(
+                    rel, f"{where}.expected: must be one of the check's clips "
+                    f"({', '.join(check.clips)})",
+                )
+            if not instrument.pairwise and item.type != "likert":
+                raise _invalid(
+                    rel, f"{where}.item: a 2-clip check of a single-clip Instrument needs a "
+                    f"likert item, not {item.type}",
+                )
+            if not instrument.pairwise and (item.points or 0) < 3:
+                raise _invalid(
+                    rel, f"{where}.item: a 2-clip check needs a likert item of at least 3 "
+                    f"points ({check.item} has {item.points}: ties are expected)",
+                )
+        else:
+            if item.type == "free_text":
+                raise _invalid(
+                    rel, f"{where}.item: {check.item} is a free_text item; a check needs a "
+                    "likert or pairwise item",
+                )
+            problem = item.value_problem(check.expected, f"{where}.expected")
+            if problem:
+                raise _invalid(rel, problem)
+        key = (check.instrument, check.item, frozenset(check.clips))
+        if key in seen:
+            first, expected = seen[key]
+            what = "duplicates" if expected == check.expected else "contradicts"
+            raise _invalid(
+                rel, f"{where}: {what} checks.{first} (same instrument, item and clips)"
+            )
+        seen[key] = (i, check.expected)
 
 
 def _is_self_report(study: Path, name: str) -> bool:

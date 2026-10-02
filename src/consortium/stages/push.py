@@ -400,7 +400,8 @@ def push_test(study_dir: Path | str, path: Path | str) -> str:
     A file outside ``tests/`` is copied to ``tests/<name>.yaml``; one already
     there is recorded in place. Re-pushing identical bytes is a no-op; changed
     bytes under a registered name raise ``test_exists``. A ``kind: main`` Test
-    is registered as not openable. First error wins; on any error nothing is
+    is registered as not openable, and so is a ``kind: screening`` Test (story 3.2: it
+    is run by ``screen models``, never opened). First error wins; on any error nothing is
     copied or registered. File-system and SQLite failures are ``push_failed``.
     """
     study = Path(study_dir)
@@ -457,7 +458,7 @@ def _push_test(study: Path, src: Path, fail: Fail) -> str:
 
         row = {
             "name": name, "kind": test.kind, "path": stored, "sha256": sha,
-            "openable": test.kind != "main",
+            "openable": test.kind == "pilot",
         }
         clip_rows = [(c, "target") for c in test.clips]
         practice = dict.fromkeys(c for ex in test.practice for c in ex.clips)

@@ -70,6 +70,17 @@
           "title": "Output Tokens",
           "type": "integer"
         },
+        "perception": {
+          "default": "random",
+          "description": "How the Fake rater answers Items about Clips (story 3.2): random (as any Item), faithful (follows each Clip's hidden latent, fake_latent) or unfaithful (follows 1 - latent).",
+          "enum": [
+            "random",
+            "faithful",
+            "unfaithful"
+          ],
+          "title": "Perception",
+          "type": "string"
+        },
         "refusal_rate": {
           "default": 0.0,
           "description": "Probability (0-1) that an attempt simulates a safety refusal (category refused); decided per attempt seed.",
@@ -518,6 +529,14 @@
         },
         "leak_tolerance": {
           "$ref": "#/$defs/LeakTolerance"
+        },
+        "perception_min": {
+          "default": 0.8,
+          "description": "Perception screening (story 3.2): a Model passes an Instrument when its pass ratio over the screening Test's checks is at least this.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Perception Min",
+          "type": "number"
         },
         "persona_fidelity_min": {
           "maximum": 1,

@@ -195,6 +195,12 @@ class FakeSettings(_Strict):
         description="How the Fake rater answers keyed self-report Items (story 3.1): random "
         "(as any Item), faithful (follows the Persona card) or unfaithful (the opposite).",
     )
+    perception: Literal["random", "faithful", "unfaithful"] = Field(
+        default="random",
+        description="How the Fake rater answers Items about Clips (story 3.2): random (as "
+        "any Item), faithful (follows each Clip's hidden latent, fake_latent) or unfaithful "
+        "(follows 1 - latent).",
+    )
 
 
 class ModelConfig(_Strict):
@@ -324,6 +330,11 @@ class Thresholds(_Strict):
     persona_fidelity_min: Annotated[StrictFloat, Field(ge=0, le=1)]
     invalid_rate_max: Annotated[StrictFloat, Field(ge=0, le=1)]
     leak_tolerance: LeakTolerance
+    perception_min: Annotated[StrictFloat, Field(ge=0, le=1)] = Field(
+        default=0.8,
+        description="Perception screening (story 3.2): a Model passes an Instrument when "
+        "its pass ratio over the screening Test's checks is at least this.",
+    )
 
 
 QuotaLevels = Annotated[list[StrictStr], Field(min_length=1)]
@@ -472,6 +483,25 @@ class PracticeExample(_Strict):
     answer: dict[StrictStr, AnswerValue]
 
 
+class PerceptionCheck(_Strict):
+    """A known answer about 1-2 Clips (story 3.2, ``kind: screening`` Tests only).
+
+    A pairwise Instrument, or a single-Clip Instrument given 2 Clips, is a *pair* check:
+    ``expected`` is the Clip that should win. A single Clip is a *low-level* check:
+    ``expected`` is the answer to ``item``. ``config.load.load_test`` checks the rest.
+    """
+
+    instrument: InstrumentName
+    item: Annotated[StrictStr, Field(pattern=_NAME_PATTERN)]
+    clips: Annotated[list[ClipId], Field(min_length=1, max_length=2)]
+    expected: AnswerValue
+
+    @field_validator("clips")
+    @classmethod
+    def _clips_unique(cls, value: list[str]) -> list[str]:
+        return _unique(value, "clip")
+
+
 class TestConfig(_Strict):
     __test__ = False  # not a pytest test class
 
@@ -483,11 +513,21 @@ class TestConfig(_Strict):
     clips: list[ClipId] = Field(default_factory=list)
     practice: list[PracticeExample] = Field(default_factory=list)
     session: SessionOverrides = Field(default_factory=SessionOverrides)
+    checks: list[PerceptionCheck] = Field(
+        default_factory=list,
+        description="Perception checks with known answers (kind: screening only, story 3.2).",
+    )
 
     @field_validator("instruments")
     @classmethod
     def _instruments_unique(cls, value: list[str]) -> list[str]:
         return _unique(value, "instrument")
+
+    @model_validator(mode="after")
+    def _checks_only_for_screening(self) -> TestConfig:
+        if self.checks and self.kind != "screening":
+            raise ValueError(f"checks: only allowed in a kind: screening Test, not {self.kind}")
+        return self
 
     @field_validator("models")
     @classmethod
@@ -546,6 +586,10 @@ class ItemDef(_Strict):
         elif self.options is not None:
             raise ValueError(f"{self.type} item takes no 'options'")
         return self
+
+    def value_problem(self, value: Any, field: str) -> str | None:
+        """Why ``value`` is not a valid answer to this Item (``"<field>: <reason>"``)."""
+        return _schema_problem(self.answer_schema(), value, field)
 
     def answer_schema(self) -> dict[str, Any]:
         """JSON Schema of one valid answer to this Item."""

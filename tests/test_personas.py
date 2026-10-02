@@ -992,11 +992,11 @@ def test_panel_in_use_rechecked_before_rename(
     before = _tree(study)
     calls: list[int] = []
 
-    def trials_appear(conn) -> bool:  # an ``open`` plans Trials after the first check
+    def trials_appear(conn, neutral: str = "p0") -> bool:  # an ``open`` plans Trials later
         calls.append(1)
         return len(calls) > 1
 
-    monkeypatch.setattr(stage, "any_trials", trials_appear)
+    monkeypatch.setattr(stage, "any_panel_trials", trials_appear)
     _board_with_trial(study, with_trial=False)
     with pytest.raises(ConsortiumError) as info:
         generate(study, force=force)

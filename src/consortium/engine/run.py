@@ -52,7 +52,7 @@ import hashlib
 import os
 import sqlite3
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -63,6 +63,7 @@ from consortium.board.clips import list_clips
 from consortium.board.db import read_only
 from consortium.board.lease import acquire_lease
 from consortium.board.ledger import committed_usd, current_ceiling, set_ceiling
+from consortium.board.screening import run_number
 from consortium.board.tests import get_test, paused_reason, set_paused
 from consortium.board.trials import (
     MODEL_PURPOSE,
@@ -89,6 +90,8 @@ from consortium.config.models import (
 )
 from consortium.core.cost import PlanEstimate, estimate_plan, usd
 from consortium.core.errors import ConsortiumError
+from consortium.core.media_limits import TrialShape
+from consortium.core.perception import check_shapes
 from consortium.core.personas import Persona
 from consortium.core.plan import Plan, Trial, plan_test
 from consortium.core.render import TrialRequest, canonical_json, practice_for, render
@@ -442,25 +445,50 @@ def _read_registration(study: Path, test: str) -> tuple[dict, dict[str, dict]]:
 
 
 def load_test_context(
-    study: Path, test: str, reader: ConfigReader
+    study: Path,
+    test: str,
+    reader: ConfigReader,
+    *,
+    run: str | None = None,
+    cards: Mapping[str, str] | None = None,
 ) -> tuple[TestContext, TestConfig, list[Persona]]:
-    """The registered Test's checks and render inputs (see ``stages.open.open_test``)."""
+    """The registered Test's checks and render inputs (see ``stages.open.open_test``).
+
+    ``open`` (``run`` None) refuses any ``kind: screening`` registration (a user screening
+    Test or a screening run ``s<n>``) with ``screening_test_not_openable``, before the
+    ``openable`` check. A perception run (story 3.2) passes its run name ``run`` (the
+    Trials' ``tests`` row ``s<n>``) and reads the registered screening Test ``test`` (the
+    stage has checked it is one); when the run's ``tests`` row exists it must still record
+    that Test's file SHA-256 (``test_changed``). Its media limits are checked over the
+    Trials its checks need only (``core.perception.check_shapes``). ``cards`` replaces the
+    Panel's Persona cards (the neutral ``p0``); the Panel is then not read and no Persona
+    is returned.
+    """
     cfg = reader.load_study(study)
     prices = reader.load_prices(study)
     row, clip_rows = _read_registration(study, test)
-    if row["kind"] == "screening" and not row["openable"]:
-        raise ConsortiumError(
-            "screening_test_not_openable",
-            f"{test!r} is a screening run; it is run by consortium screen personas "
-            "(--resume to continue it)",
-        )
-    if row["kind"] == "main":
+    if row["kind"] == "screening":
+        if run is None:
+            what = (
+                "a screening run; it is run by consortium screen personas or screen models "
+                "(--resume to continue it)" if run_number(test)
+                else f"a kind: screening Test; run it with consortium screen models {test}"
+            )
+            raise ConsortiumError("screening_test_not_openable", f"{test!r} is {what}")
+        run_row = read_only(study, lambda conn: get_test(conn, run))
+        if run_row is not None and run_row["sha256"] != row["sha256"]:
+            raise ConsortiumError(
+                "test_changed",
+                f"screening run {run} was planned from another version of {test!r}",
+                path=row["path"],
+            )
+    elif row["kind"] == "main":
         raise ConsortiumError(
             "protocol_lock_unavailable",
             f"Test {test!r} is kind main; main Tests open only once the Protocol lock "
             "exists (Epic 4)",
         )
-    if not row["openable"]:
+    elif not row["openable"]:
         raise ConsortiumError(
             "protocol_lock_unavailable", f"Test {test!r} is registered as not openable"
         )
@@ -503,16 +531,22 @@ def load_test_context(
             if clip not in clip_rows:
                 raise fail("bad_practice", f"practice[{i}]: {clip!r} is not a pushed Clip")
     models = [cfg.model_by_id(m) for m in test_cfg.model_ids(cfg)]
+    if run is not None:  # a perception run sends only the Trials its checks need
+        shapes = _check_trial_shapes(shapes, check_shapes(test_cfg.checks, instruments))
     check_media_limits(shapes, clip_rows, models, fail)
 
-    personas = reader.load_personas(study)
+    if cards is None:
+        personas = reader.load_personas(study)
+        card_texts = {p.id: reader.read_card(study, p.id) for p in personas}
+    else:
+        personas, card_texts = [], dict(cards)
     ctx = TestContext(
         cfg=cfg,
         kind=test_cfg.kind,
         instrument_order=list(test_cfg.instruments),
         rel=rel,
         test_sha256=row["sha256"],
-        cards={p.id: reader.read_card(study, p.id) for p in personas},
+        cards=card_texts,
         instruments=instruments,
         practice={
             name: practice_for(test_cfg.practice, name, practice_per_instrument)
@@ -524,6 +558,33 @@ def load_test_context(
         max_retries=test_cfg.effective_session(cfg).max_retries,
     )
     return ctx, test_cfg, personas
+
+
+def check_file(study: Path, ctx: TestContext, changed: ConsortiumError) -> None:
+    """``changed`` unless the registered file still has the confirmed SHA-256 (for a
+    stage's ``reload`` hook, as ``prepare_test`` does)."""
+    _check_file(study, ctx, changed)
+
+
+def _check_trial_shapes(
+    shapes: Sequence[TrialShape], planned: Sequence[tuple]
+) -> list[TrialShape]:
+    """The media-limit view of a perception run's Trials: per Instrument, its Practice
+    (from ``shapes``) and only the Clips its checks use; one shape per pair."""
+    practice = {s.instrument: s for s in shapes}
+    out: list[TrialShape] = []
+    singles: dict[str, list[str]] = {}
+    for name, clip_ids, pid, position in planned:
+        base = practice[name]
+        if pid is not None:
+            if position == 1:
+                out.append(TrialShape(name, True, base.practice, tuple(clip_ids)))
+        else:
+            singles.setdefault(name, []).extend(clip_ids)
+    for name, clips in singles.items():
+        base = practice[name]
+        out.append(TrialShape(name, False, base.practice, tuple(dict.fromkeys(clips))))
+    return out
 
 
 def _check_file(study: Path, ctx: TestContext, changed: ConsortiumError) -> None:
@@ -591,10 +652,11 @@ def raters_for(
 
     ``fake``: one ``FakeRater`` per Model, reporting that Model's ``fake`` usage and
     simulating its ``fake`` rates (and, story 3.1, its ``fake.fidelity`` mode, reading
-    ``cues``). ``gemini`` / ``qwen``: a ``GeminiRater`` / ``QwenRater`` with a
-    ``ModelSpec`` built from the config plus the key from the Model's key env var
-    (``api_key_missing`` when it is unset or empty). Building a Rater makes no network
-    call. The adapter classes can be substituted (``fake``, ``gemini``, ``qwen``).
+    ``cues``; story 3.2, its ``fake.perception`` mode). ``gemini`` / ``qwen``: a
+    ``GeminiRater`` / ``QwenRater`` with a ``ModelSpec`` built from the config plus the
+    key from the Model's key env var (``api_key_missing`` when it is unset or empty).
+    Building a Rater makes no network call. The adapter classes can be substituted
+    (``fake``, ``gemini``, ``qwen``).
     """
     fake_cls = fake or FakeRater
     gemini_cls = gemini or GeminiRater
@@ -608,6 +670,9 @@ def raters_for(
             extra: dict[str, Any] = (
                 {"fidelity": fidelity, "cues": cues} if fidelity != "random" else {}
             )
+            perception = getattr(settings, "perception", "random")
+            if perception != "random":
+                extra["perception"] = perception
             out[model_id] = fake_cls(
                 input_tokens=settings.input_tokens, output_tokens=settings.output_tokens,
                 invalid_rate=settings.invalid_rate, transient_rate=settings.transient_rate,

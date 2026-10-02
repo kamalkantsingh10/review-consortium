@@ -1,0 +1,16 @@
+# Built-in Instrument: low-level perception cues for screening Tests (story 3.2).
+# Low-level checks ({instrument: perception_cues, item: moving, clips: [<one Clip>],
+# expected: 2}) check that a Model sees what is plainly in a Clip; 2 means Yes.
+# They count toward perception_cues' own result and never toward construct coverage.
+schema_version: 1
+name: perception_cues
+version: "1"
+draft: false
+instructions: >-
+  Please answer each question about the robot in the video clip.
+prompt_variants:
+  default: >-
+    Watch the video clip, then answer every question with 1 for No or 2 for Yes.
+items:
+  - {id: moving, type: likert, text: "Is the robot moving?", points: 2, anchors: {low: "No", high: "Yes"}}
+  - {id: speech, type: likert, text: "Is there speech?", points: 2, anchors: {low: "No", high: "Yes"}}

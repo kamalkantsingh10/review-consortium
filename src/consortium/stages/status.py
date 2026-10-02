@@ -17,8 +17,9 @@ Study-wide: committed spend, the ceiling and ``state: ok`` or
 
 ``--json`` also carries ``by_persona_attribute`` (story 2.1): per Test,
 ``core.personas.ATTRITION_COUNTS`` per Persona attribute value (the export's
-``persona_*`` names, via ``core.personas.tally_by_attribute``); ``null`` when the
-Panel cannot be loaded. It never carries a Condition.
+``persona_*`` names, via ``core.personas.tally_by_attribute``; the neutral Persona ``p0``
+of perception screening is skipped); ``null`` when the Panel cannot be loaded. It never
+carries a Condition.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from consortium.board.trials import TRIAL_STATES
 from consortium.config.load import load_personas
 from consortium.core.cost import usd
 from consortium.core.errors import ConsortiumError
+from consortium.core.perception import NEUTRAL_PERSONA_ID
 from consortium.core.personas import tally_by_attribute
 from consortium.core.validate import invalid_rate
 
@@ -176,8 +178,15 @@ def _by_persona_attribute(
     study_dir: Path | str, tests: list[str], by_persona: dict[str, dict[str, dict[str, int]]]
 ) -> dict[str, dict[str, dict[str, dict[str, int]]]] | None:
     """Per Test, the attribute tallies of its Personas; None when the Panel cannot be
-    loaded (or lacks a Persona of the Trials). Reads only ``panel/personas/index.json``."""
-    if not by_persona:  # no Trials anywhere: no Panel needed
+    loaded (or lacks a Persona of the Trials). Reads only ``panel/personas/index.json``.
+    The neutral Persona ``p0`` of perception screening (story 3.2) is not a Panel Persona
+    and is skipped."""
+    by_persona = {
+        name: {pid: c for pid, c in counts.items() if pid != NEUTRAL_PERSONA_ID}
+        for name, counts in by_persona.items()
+    }
+    by_persona = {name: counts for name, counts in by_persona.items() if counts}
+    if not by_persona:  # no Panel Persona's Trials anywhere: no Panel needed
         return {name: tally_by_attribute({}, {}) for name in tests}
     try:
         personas = {p.id: p for p in load_personas(study_dir)}

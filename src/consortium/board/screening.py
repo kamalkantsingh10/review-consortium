@@ -108,10 +108,15 @@ def new_run(
     sha256: str,
     trials: Iterable[Trial],
     settings_hashes: Mapping[str, str],
+    *,
+    clips: Iterable[tuple[str, str]] = (),
+    instrument_hash: str | None = None,
 ) -> int:
     """In one transaction: the ``screening_runs`` row (``open``, with its stamps
-    ``settings_hashes`` and ``instrument_hash = sha256``), its ``tests`` row (kind
-    ``screening``, not openable, ``path``, ``sha256``) and its Trials (``planned``).
+    ``settings_hashes`` and ``instrument_hash``, default ``sha256``), its ``tests`` row
+    (kind ``screening``, not openable, ``path``, ``sha256`` and the ``(clip_id, role)``
+    rows ``clips``: a perception run copies its screening Test's) and its Trials
+    (``planned``).
 
     Refuses (nothing written) with ``test_changed`` when ``run_id`` is no longer the next
     run ID and ``screening_run_open`` when a run of ``kind`` is still open. Returns the
@@ -129,13 +134,14 @@ def new_run(
             f"INSERT INTO screening_runs ({', '.join(_RUN_COLUMNS)})"
             f" VALUES ({', '.join('?' * len(_RUN_COLUMNS))})",
             (run_id, kind, screening_test, utc_now_ms(), "open", None,
-             json.dumps(dict(settings_hashes), sort_keys=True, separators=(",", ":")), sha256),
+             json.dumps(dict(settings_hashes), sort_keys=True, separators=(",", ":")),
+             sha256 if instrument_hash is None else instrument_hash),
         )
         insert_test(
             conn,
             {"name": run_id, "kind": SCREENING_KIND, "path": path, "sha256": sha256,
              "openable": False},
-            [],
+            list(clips),
         )
         return insert_trials(conn, run_id, trials)
 
@@ -223,15 +229,18 @@ def run_results(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
 
 
 def current_results(conn: sqlite3.Connection, kind: str | None = None) -> list[dict[str, Any]]:
-    """Per result key ``(instrument, model_id, agent_id)``, the row from the
-    highest-numbered complete run (of ``kind`` when given) that has that key.
+    """Per result key ``(screening_test, instrument, model_id, agent_id)``, the row from
+    the highest-numbered complete run (of ``kind`` when given) that has that key. A
+    perception result is current per screening Test (story 3.2): runs of different
+    screening Tests never hide each other's results; fidelity runs have no screening Test.
 
     Rows are in run-number, then insertion order.
     """
     if not _has_table(conn, "screening_results"):
         return []
     rows = conn.execute(
-        f"SELECT {', '.join('r.' + c for c in RESULT_COLUMNS)} FROM screening_results r"
+        f"SELECT {', '.join('r.' + c for c in RESULT_COLUMNS)}, s.screening_test"
+        " FROM screening_results r"
         " JOIN screening_runs s ON s.run_id = r.run_id"
         " WHERE s.status = 'complete'"
         + (" AND s.kind = ?" if kind is not None else "")
@@ -240,8 +249,9 @@ def current_results(conn: sqlite3.Connection, kind: str | None = None) -> list[d
     ).fetchall()
     best: dict[tuple, dict[str, Any]] = {}
     for raw in rows:
-        row = dict(zip(RESULT_COLUMNS, raw, strict=True))
-        held = best.get(_key(row))
+        row = dict(zip(RESULT_COLUMNS, raw[:-1], strict=True))
+        key = (raw[-1], *_key(row))
+        held = best.get(key)
         if held is None or run_number(row["run_id"]) > run_number(held["run_id"]):
-            best[_key(row)] = row
+            best[key] = row
     return sorted(best.values(), key=lambda r: run_number(r["run_id"]))

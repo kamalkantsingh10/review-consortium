@@ -1,5 +1,50 @@
 {
   "$defs": {
+    "PerceptionCheck": {
+      "additionalProperties": false,
+      "description": "A known answer about 1-2 Clips (story 3.2, ``kind: screening`` Tests only).\n\nA pairwise Instrument, or a single-Clip Instrument given 2 Clips, is a *pair* check:\n``expected`` is the Clip that should win. A single Clip is a *low-level* check:\n``expected`` is the answer to ``item``. ``config.load.load_test`` checks the rest.",
+      "properties": {
+        "clips": {
+          "items": {
+            "pattern": "^c_[a-z2-7]{8}$",
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Clips",
+          "type": "array"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Expected"
+        },
+        "instrument": {
+          "pattern": "^[a-z0-9][a-z0-9_]*$",
+          "title": "Instrument",
+          "type": "string"
+        },
+        "item": {
+          "pattern": "^[a-z0-9][a-z0-9_]*$",
+          "title": "Item",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instrument",
+        "item",
+        "clips",
+        "expected"
+      ],
+      "title": "PerceptionCheck",
+      "type": "object"
+    },
     "PracticeExample": {
       "additionalProperties": false,
       "description": "A Practice clip (or pair) with the intended answer shown to the Model.",
@@ -105,6 +150,14 @@
   },
   "additionalProperties": false,
   "properties": {
+    "checks": {
+      "description": "Perception checks with known answers (kind: screening only, story 3.2).",
+      "items": {
+        "$ref": "#/$defs/PerceptionCheck"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
     "clips": {
       "items": {
         "pattern": "^c_[a-z2-7]{8}$",

@@ -73,6 +73,19 @@ def insert_test(
     )
 
 
+def tests_of_kind(conn: sqlite3.Connection, kinds: Iterable[str]) -> list[dict[str, Any]]:
+    """``{"name", "kind", "path"}`` of every registered Test of one of ``kinds``, by name."""
+    wanted = sorted(set(kinds))
+    if not wanted:
+        return []
+    rows = conn.execute(
+        f"SELECT name, kind, path FROM tests WHERE kind IN ({', '.join('?' * len(wanted))})"
+        " ORDER BY name",
+        wanted,
+    ).fetchall()
+    return [{"name": n, "kind": k, "path": p} for n, k, p in rows]
+
+
 def target_clip_kinds(
     conn: sqlite3.Connection, clip_ids: Iterable[str]
 ) -> dict[str, list[tuple[str, str]]]:

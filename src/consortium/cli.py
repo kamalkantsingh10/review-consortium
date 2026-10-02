@@ -17,7 +17,13 @@ from consortium.stages.export import export_test
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, usd
 from consortium.stages.push import push_clip, push_test
-from consortium.stages.screen import abandon_personas, screen_personas
+from consortium.stages.screen import (
+    ScreenSummary,
+    abandon_models,
+    abandon_personas,
+    screen_models,
+    screen_personas,
+)
 from consortium.stages.status import format_table, status
 
 
@@ -185,7 +191,9 @@ def open_cmd(
         )
 
 
-screen_app = typer.Typer(help="Screen the Panel before it rates (Persona fidelity).")
+screen_app = typer.Typer(
+    help="Screen the Panel before it rates (Persona fidelity, Model perception)."
+)
 app.add_typer(screen_app, name="screen")
 
 
@@ -236,6 +244,11 @@ def screen_personas_cmd(
     summary = screen_personas(
         study, yes=yes, ceiling=ceiling, resume=resume, confirm=_confirm, announce=announce,
     )
+    _screen_output(summary, announced, "consortium screen personas --resume")
+
+
+def _screen_output(summary: ScreenSummary, announced: list[str], resume_cmd: str) -> None:
+    """The runner summary (minus announced lines), the results and the warnings."""
     run = summary.run
     pending = list(announced)
     for line in run.lines():
@@ -257,8 +270,48 @@ def screen_personas_cmd(
         raise ConsortiumError(
             "ceiling_reached",
             "Screening run paused at the ceiling; continue with "
-            "`consortium screen personas --resume --ceiling <higher USD>`",
+            f"`{resume_cmd} --ceiling <higher USD>`",
         )
+
+
+@screen_app.command("models")
+def screen_models_cmd(
+    test: Annotated[str, typer.Argument(help="Name of a registered kind: screening Test.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+    ceiling: Annotated[
+        str | None, typer.Option("--ceiling", help="Cost ceiling in USD, e.g. 5.00.")
+    ] = None,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Continue the open perception run of TEST.")
+    ] = False,
+    abandon: Annotated[
+        bool,
+        typer.Option("--abandon", help="Mark the open perception run of TEST abandoned (no "
+                     "results; its Trials and Archive are kept)."),
+    ] = False,
+    study: StudyOption = Path("."),
+) -> None:
+    """Run a perception screening run s<n> of the screening Test TEST: only the Trials its
+    checks need, on every Model of TEST, answered by the neutral Persona p0. Each Model x
+    Instrument passes when its pass ratio is at least thresholds.perception_min. Prints
+    the run summary, the results and the coverage gaps (also coverage_gap on stderr)."""
+    if resume and abandon:
+        raise ConsortiumError("bad_option", "--resume and --abandon cannot be combined")
+    if abandon:
+        typer.echo(f"screening run: {abandon_models(study, test)} (perception) abandoned")
+        return
+    announced: list[str] = []
+
+    def announce(lines: list[str]) -> None:  # printed before confirmation and dispatch
+        for line in lines:
+            typer.echo(line)
+        announced.extend(lines)
+
+    summary = screen_models(
+        study, test, yes=yes, ceiling=ceiling, resume=resume, confirm=_confirm,
+        announce=announce, warn=lambda line: typer.echo(line, err=True),
+    )
+    _screen_output(summary, announced, f"consortium screen models {test} --resume")
 
 
 @app.command("status")

@@ -99,7 +99,7 @@ def test_fresh_study_loads(study: Path) -> None:
     assert cfg.personas.nars_bands == ["low", "high"]
 
     instruments = load_instruments(study, cfg)
-    assert list(instruments) == ["godspeed", "pairwise_alive", "presence"]
+    assert list(instruments) == ["godspeed", "pairwise_alive", "presence", "perception_cues"]
 
     test = load_test(study / "tests" / "example.yaml")
     assert (test.test, test.kind, test.instruments) == ("example", "pilot", ["godspeed"])

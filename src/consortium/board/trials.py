@@ -61,6 +61,23 @@ def any_trials(conn: sqlite3.Connection) -> bool:
     return conn.execute("SELECT 1 FROM trials LIMIT 1").fetchone() is not None
 
 
+def any_panel_trials(conn: sqlite3.Connection, neutral: str = "p0") -> bool:
+    """Whether any Trial of a Panel Persona is stored (Trials of the neutral Persona
+    ``neutral`` of perception screening do not count); False when there is no ``trials``
+    table."""
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trials'"
+    ).fetchone()
+    if table is None:
+        return False
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(trials)")}
+    if "persona_id" not in columns:  # an older layout: every Trial counts
+        return conn.execute("SELECT 1 FROM trials LIMIT 1").fetchone() is not None
+    return conn.execute(
+        "SELECT 1 FROM trials WHERE persona_id != ? LIMIT 1", (neutral,)
+    ).fetchone() is not None
+
+
 def count_trials(conn: sqlite3.Connection, test: str) -> int:
     """How many Trials of ``test`` are stored."""
     return conn.execute("SELECT count(*) FROM trials WHERE test = ?", (test,)).fetchone()[0]

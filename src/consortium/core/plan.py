@@ -174,11 +174,14 @@ def plan_test(
     cfg: _Study,
     personas: Sequence[_Persona],
     instruments: Mapping[str, _Instrument],
+    shapes: Sequence[_Shape] | None = None,
 ) -> Plan:
     """Every Session and Trial of ``test`` (a ``TestConfig``) for ``cfg`` (a ``StudyConfig``).
 
     ``instruments`` must hold every Instrument the Test lists (else
-    ``unknown_instrument``). Same inputs give the same Plan.
+    ``unknown_instrument``). ``shapes`` (story 3.2: a perception run's
+    ``core.perception.check_shapes``) replaces the canonical Trial list of each Session.
+    Same inputs give the same Plan.
     """
     missing = [name for name in test.instruments if name not in instruments]
     if missing:
@@ -186,7 +189,8 @@ def plan_test(
             "unknown_instrument", f"instrument(s) not loaded: {', '.join(missing)}"
         )
     repeats = test.effective_session(cfg).repeats
-    shapes = canonical_trials(test.instruments, test.clips, instruments)
+    if shapes is None:
+        shapes = canonical_trials(test.instruments, test.clips, instruments)
     sessions: list[Session] = []
     for persona in personas:
         for model_id in test.model_ids(cfg):
