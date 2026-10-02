@@ -2,7 +2,8 @@
 title: 'Story 1.6 — Plan and render Trials'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'c0f1c157e9d8c0f4b77cbabcdfbebde7e9b0b0a6'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -62,13 +63,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/core/plan.py` -- `Session`, `Trial` (frozen dataclasses: `trial_id = <session_id>/t<trial_index>`, `test`, `session_id`, `trial_index`, `instrument`, `clip_ids`, `pair_id`, `position`, `prompt_variant`, `order_seed`, `repeat`, `agent_id`, `persona_id`, `model_id`), `Plan`, and `plan_test(test, cfg, personas, instruments) -> Plan` per the rules above. -- FR14, FR16, AD-10.
-- [ ] `src/consortium/core/render.py` -- `TrialRequest`, `canonical_json`, and `render(trial, *, persona_card, instrument, practice, clip_sha256) -> TrialRequest`. -- FR15, FR17, AD-7.
-- [ ] `src/consortium/board/db.py` -- `connect(study_dir, readonly=False)`: with `readonly=True` it opens a `file:…?mode=ro` URI, never migrates or writes, returns `None` if `board.db` is absent, and raises `board_version_mismatch` if `user_version` ≠ `len(MIGRATIONS)`. The one read-only entry point; 1.11 and 1.12 reuse it. -- Dry run must not write.
-- [ ] `src/consortium/stages/open.py` -- `open_test(study_dir, test, *, dry_run, yes, ceiling, resume)`: load config, Test (from its registered path), Instruments, Personas (`load_personas`) and their cards (`panel/personas/<id>.md`); refuse `main`; plan; render every Trial; return a summary. Non-dry-run raises `run_unavailable`. -- Use case.
-- [ ] `src/consortium/cli.py` -- `open TEST [--dry-run] [--yes] [--ceiling] [--resume] [--study]`; prints the summary to stdout. -- Thin adapter.
-- [ ] `docs/INTERFACE.md` -- document `open --dry-run`, Session/Trial/pair ID formats, position, variant rotation, and `TrialRequest` contents. -- Definition of done.
-- [ ] `tests/test_plan.py`, `tests/test_render.py`, `tests/test_open.py` -- every matrix row; render excludes other Trials' Clips and any ID/Condition string; folder snapshot equal before and after dry run.
+- [x] `src/consortium/core/plan.py` -- `Session`, `Trial` (frozen dataclasses: `trial_id = <session_id>/t<trial_index>`, `test`, `session_id`, `trial_index`, `instrument`, `clip_ids`, `pair_id`, `position`, `prompt_variant`, `order_seed`, `repeat`, `agent_id`, `persona_id`, `model_id`), `Plan`, and `plan_test(test, cfg, personas, instruments) -> Plan` per the rules above. -- FR14, FR16, AD-10.
+- [x] `src/consortium/core/render.py` -- `TrialRequest`, `canonical_json`, and `render(trial, *, persona_card, instrument, practice, clip_sha256) -> TrialRequest`. -- FR15, FR17, AD-7.
+- [x] `src/consortium/board/db.py` -- `connect(study_dir, readonly=False)`: with `readonly=True` it opens a `file:…?mode=ro` URI, never migrates or writes, returns `None` if `board.db` is absent, and raises `board_version_mismatch` if `user_version` ≠ `len(MIGRATIONS)`. The one read-only entry point; 1.11 and 1.12 reuse it. -- Dry run must not write.
+- [x] `src/consortium/stages/open.py` -- `open_test(study_dir, test, *, dry_run, yes, ceiling, resume)`: load config, Test (from its registered path), Instruments, Personas (`load_personas`) and their cards (`panel/personas/<id>.md`); refuse `main`; plan; render every Trial; return a summary. Non-dry-run raises `run_unavailable`. -- Use case.
+- [x] `src/consortium/cli.py` -- `open TEST [--dry-run] [--yes] [--ceiling] [--resume] [--study]`; prints the summary to stdout. -- Thin adapter.
+- [x] `docs/INTERFACE.md` -- document `open --dry-run`, Session/Trial/pair ID formats, position, variant rotation, and `TrialRequest` contents. -- Definition of done.
+- [x] `tests/test_plan.py`, `tests/test_render.py`, `tests/test_open.py` -- every matrix row; render excludes other Trials' Clips and any ID/Condition string; folder snapshot equal before and after dry run.
 
 **Acceptance Criteria:**
 - Given two Study folders with the same seed and inputs, when each is dry-run planned, then Trial order and every rendered request are byte-identical.
@@ -79,6 +80,24 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC, VG | immutable=1 read races with a writer starting after the -wal check | medium | patch (re-check and redo without immutable) |
+| 2 | BH, EC | Stale -wal after a crash makes SQLite create -shm (dry run "writes") | low | patch (doc: no Study data written) |
+| 3 | EC | Corrupt or unopenable board.db gives a traceback | medium | patch (board_unreadable) |
+| 4 | EC | Test file hashed, then re-read | medium | patch (test_changed) |
+| 5 | BH, EC | Config drift after push (practice, limits, pairing, Instruments) passes the dry run; raw KeyErrors | medium | patch (shared core checks re-run at open) |
+| 6 | BH, EC | Non-main not-openable Test gets a main-Test message | low | patch |
+| 7 | BH | --ceiling unvalidated | low | patch (bad_ceiling) |
+| 8 | BH | Docs claim the dry run "shows exactly what is sent"; all requests held in memory | medium | patch (streamed requests digest) |
+| 9 | BH | Per-session count from the first Session only | low | patch |
+| 10 | BH | Missing bool overload on connect | low | patch |
+| 11 | BH | Module fixture mutated, so tests are order-dependent | medium | patch |
+| 12 | BH, EC | Naming and doc gaps (per_trial, items nulls, version-mismatch wording, \u escapes) | low | patch |
+| 13 | VG | Variant prompt never rendered for a non-default variant; missing-file branch untested | medium | patch (tests) |
+| 14 | VG | Multi-Model summary order untested | low | Rejected: human-readable output only |
+| 15 | VG | --yes/--resume "accepted" untested | low | Rejected: stories 1.7–1.9 give them behaviour and tests |
 
 ## Design Notes
 

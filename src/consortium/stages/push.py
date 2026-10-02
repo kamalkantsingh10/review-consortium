@@ -33,7 +33,7 @@ from consortium.config.load import load_instruments, load_study, load_test, peek
 from consortium.config.models import LeakTolerance, MediaProfile, StudyConfig, TestConfig
 from consortium.core.errors import ConsortiumError
 from consortium.core.ids import new_clip_id
-from consortium.core.media_limits import TrialShape, check_media
+from consortium.core.test_checks import Fail, check_media_limits, check_plan
 from consortium.media.canonicalize import canonicalize
 
 log = logging.getLogger(__name__)
@@ -286,8 +286,6 @@ TEST_NAME_PATTERN = r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$"
 _TEST_NAME = re.compile(TEST_NAME_PATTERN)
 _NO_HARD_LINKS = {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}
 
-Fail = Callable[[str, str], ConsortiumError]
-
 
 def _display_path(path: Path, study: Path) -> str:
     try:
@@ -363,50 +361,15 @@ def _validate_test(
             if clip not in clips:
                 raise fail("bad_practice", f"practice[{i}]: {clip!r} is not a pushed Clip")
 
-    # Plan.
-    if not test.clips:
-        raise fail("bad_pairing", "clips: a Test needs at least 1 target Clip")
-    for name in test.instruments:
-        if instruments[name].pairwise and len(test.clips) < 2:
-            raise fail(
-                "bad_pairing",
-                f"clips: pairwise Instrument {name!r} needs at least 2 target Clips, "
-                f"got {len(test.clips)}",
-            )
-
-    # Practice.
-    targets = set(test.clips)
-    for i, example in enumerate(test.practice):
-        if len(set(example.clips)) != len(example.clips):
-            raise fail("bad_practice", f"practice[{i}]: lists the same Clip twice")
-        for clip in example.clips:
-            if clip in targets:
-                raise fail(
-                    "bad_practice",
-                    f"practice: {clip} is both a Practice clip (practice[{i}]) and a target",
-                )
-    per_trial = test.effective_session(cfg).practice_clips
-    shapes: list[TrialShape] = []
-    for name in test.instruments:
-        indexes = [i for i, ex in enumerate(test.practice) if ex.instrument == name]
-        if len(indexes) < per_trial:
-            field = f"practice[{indexes[-1]}]" if indexes else "practice"
-            raise fail(
-                "bad_practice",
-                f"{field}: Instrument {name!r} has {len(indexes)} Practice example(s); "
-                f"session.practice_clips needs {per_trial}",
-            )
-        used = tuple(c for i in indexes[:per_trial] for c in test.practice[i].clips)
-        shapes.append(TrialShape(name, instruments[name].pairwise, used, tuple(test.clips)))
+    # Plan and Practice.
+    shapes = check_plan(test, instruments, test.effective_session(cfg).practice_clips, fail)
 
     # Overlap.
     _check_overlap(conn, test, fail)
 
     # Media.
     models = [cfg.model_by_id(m) for m in test.model_ids(cfg)]
-    violation = check_media(shapes, clips, models)
-    if violation is not None:
-        raise fail("media_limit_exceeded", violation.message)
+    check_media_limits(shapes, clips, models, fail)
 
 
 def _note_kind(name: str, kind: str) -> None:

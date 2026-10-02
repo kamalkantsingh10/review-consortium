@@ -123,6 +123,71 @@ Generates the Persona Panel from `study.yaml` (`seed` and `personas`) into `pane
 
 Later commands read the Panel from `index.json` (never by re-deriving it); if it is absent they fail with `panel_missing`.
 
+### `consortium open TEST [--dry-run] [--yes] [--ceiling USD] [--resume] [--study PATH]`
+
+Opens the registered Test `TEST`. In this version only `--dry-run` is available: before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request. Without `--dry-run`, `open` refuses with `run_unavailable: dispatch arrives in story 1.7` and does nothing. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used; `--yes` and `--resume` are accepted and ignored until stories 1.7-1.9.
+
+- `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
+- **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card).
+- **Plans** every Session and Trial (see [Sessions and Trials](#sessions-and-trials)) and **renders every request** (see [Trial requests](#trial-requests)), one at a time, so a broken Instrument, card or missing Clip fails here rather than mid-Run. `requests sha256` is the SHA-256 of the canonical JSON of every request concatenated in plan order (Sessions in order, Trials by `trial_index`); the same seed and inputs give the same digest in any folder.
+- **Writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted, no cost is estimated.
+- On success, prints the counts to stdout and exits `0`. For a pilot Test with 64 Personas, 1 Model, 3 Repeats, `godspeed` over 4 Clips and `pairwise_alive` over the same 4 Clips:
+
+  ```text
+  test: pilot1 (pilot) dry run
+  sessions: 192
+  trials per session: 4 + 12 = 16 (godspeed 4, pairwise_alive 12)
+  trials: 3072
+  by model: m1 3072
+  by instrument: godspeed 768, pairwise_alive 2304
+  by type: single 768, pairwise 2304
+  requests sha256: <64 lowercase hex digits>
+  ```
+
+  Models are listed in the Test's order, Instruments in the Test's order; `by type` counts single-Clip and pairwise Trials.
+
+| Situation | Result |
+| --- | --- |
+| Registered pilot or screening Test, `--dry-run` | Counts and requests digest printed, exit `0`, Study folder unchanged |
+| `kind: main` Test | `protocol_lock_unavailable`, exit `1`, nothing planned (until the Protocol lock, Epic 4) |
+| `TEST` not registered, or no `board.db` | `unknown_test`, exit `1` |
+| `panel/personas/` empty or missing | `panel_missing`, exit `1` (`panel_invalid` if the index or a card is unreadable) |
+| The registered `tests/<name>.yaml` is missing or was edited | `test_exists`, exit `1` |
+| A Clip the Test uses is no longer in `board.db` | `unknown_clip`, exit `1` |
+| `board.db` is at another layout version than this `consortium` | `board_version_mismatch`, exit `1` (a read-only open never migrates; any writing command migrates an older file) |
+| `board.db` is corrupt or SQLite cannot read it | `board_unreadable`, exit `1` |
+| The registered file changed while it was being validated | `test_changed`, exit `1` |
+| Config changed since `push test` so the Test no longer passes its checks (for example `session.practice_clips` raised, a Model's `limits` tightened, an Instrument disabled or now pairwise with fewer than 2 targets) | `bad_practice`, `media_limit_exceeded`, `unknown_instrument` or `bad_pairing`, exit `1` |
+| `--ceiling` not a decimal amount greater than 0 | `bad_ceiling`, exit `1` |
+| No `--dry-run` | `run_unavailable: dispatch arrives in story 1.7`, exit `1`, nothing happens |
+
+#### Sessions and Trials
+
+- **Agents.** Every Persona of the Panel (in ID order) x every Model of the Test (the Test's `models`, in its order; default every Model in `study.yaml`). Agent ID `p<n>-m<n>`, for example `p12-m1`.
+- **Sessions.** One per Agent and Repeat `r1 ... rN`, where N is the effective `session.repeats` (the Test's override, else `study.yaml`). Session ID `<test>/<agent>/r<repeat>`, for example `pilot1/p12-m1/r2`. Sessions are listed Persona-major, then Model, then Repeat.
+- **Trials per Session.** For each Instrument of the Test, in the Test's order:
+  - a single-Clip Instrument gives one Trial per target Clip;
+  - a pairwise Instrument (`pairing: all_pairs`) gives, for every unordered pair of target Clips, two Trials, one per presentation order. Both share `pair_id = <instrument>:<clip_lo>:<clip_hi>` (the two Clip IDs sorted). `position` `1` shows `clip_lo` first (as `A`), `position` `2` shows `clip_hi` first. With k target Clips that is k(k-1) pairwise Trials.
+- **Order.** The canonical list (Instruments in Test order; then Clips in the Test's `clips` order, pairs in `itertools.combinations` order of that list; then position 1 before 2) is shuffled with `random.Random(order_seed)`, `order_seed` = the derived seed for purpose `order` and key `<session_id>` (see [Seeds](#seeds)), using the same explicit Fisher-Yates as the Personas. The shuffled Trials are numbered `trial_index` `1 ... n`; Trial ID `<session_id>/t<trial_index>`, for example `pilot1/p12-m1/r2/t7`. Each Trial keeps its `order_seed`.
+- **Prompt variant.** Repeat `r` uses the `((r - 1) mod n)`-th of the Instrument's `prompt_variants` in declared order (n = number of variants), so with variants `default`, `alt` and 3 Repeats: `r1` `default`, `r2` `alt`, `r3` `default`. The Trial keeps the variant name.
+- Same seed and inputs give the same Trials in the same order, in any folder.
+
+#### Trial requests
+
+Each Trial is rendered into a provider-neutral request. It holds **only**:
+
+| Field | Content |
+| --- | --- |
+| `persona_card` | The Persona's `p<n>.md` text, exactly as stored. |
+| `instructions` | The Instrument's `instructions`. |
+| `items` | The Instrument's Items: `id`, `type`, `text`, `points`, `anchors` (`low`, `high`) and `options`; `points`, `anchors` and `options` are `null` when not applicable to the Item type. |
+| `response_schema` | The Instrument's response schema (see [Instruments](#instruments)). |
+| `prompt` | The text of the Trial's Prompt variant. |
+| `practice` | The Instrument's Practice examples: the first effective `session.practice_clips` entries of the Test's `practice:` list for that Instrument, in list order; each `{clips: [{clip_id, sha256}, ...], answer: {item_id: value}}`. |
+| `clips` | The 1 or 2 target Clips as `{clip_id, sha256}`, in presentation order (the first is `A` in a pairwise Trial). |
+
+A request contains no Trial, Session, Test, Agent or Model ID, no Instrument name or `pair_id` field, nothing from any other Trial, no Condition and no provider setting. Media are referenced by Clip ID and SHA-256 only. Its canonical JSON (sorted keys; UTF-8, where control characters are `\u`-escaped and all other text is literal UTF-8; separators `,` and `:` with no whitespace) is byte-identical for the same inputs.
+
 ## Error codes
 
 | Code | Raised by | Meaning |
@@ -136,20 +201,26 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 | `media_unreadable` | `push clip` | The input file is missing, or ffmpeg cannot read or decode it. |
 | `push_failed` | `push clip`, `push test` | The file system or SQLite failed while storing the Clip or Test; nothing was stored. For `push clip` the message names no source path. |
 | `board_busy` | any command that writes `board.db` | Another process holds the `board.db` lock past the busy timeout. Try again. |
-| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. |
+| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates, such as `open --dry-run`) also raises it for an older version. |
+| `board_unreadable` | any read-only command (`open --dry-run`) | `board.db` is corrupt or SQLite cannot open or read it. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
 | `panel_exists` | `personas generate` | `panel/personas/` already holds files; pass `--force` to replace them. |
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
 | `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
 | `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
 | `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
-| `test_changed` | `push test` | The Test file changed while it was being validated; nothing was registered. Push it again. |
-| `test_exists` | `push test` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
-| `unknown_clip` | `push test` | A target Clip ID is not in `board.db` (field `clips[i]`). |
-| `bad_pairing` | `push test` | The pairing plan cannot be built: no target Clips, a pairwise Instrument with fewer than 2 targets, duplicate target Clip IDs, or a `session.pairing` other than `all_pairs`. |
-| `bad_practice` | `push test` | A Practice Clip is not pushed or is also a target, a pairwise example lists the same Clip twice, or an Instrument has fewer than `session.practice_clips` Practice examples. |
+| `test_changed` | `push test`, `open` | The Test file changed while it was being validated; nothing was registered or planned. |
+| `test_exists` | `push test`, `open` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
+| `unknown_clip` | `push test`, `open` | A target Clip ID is not in `board.db` (field `clips[i]`), or a Clip a registered Test uses is missing when its Trials are rendered. |
+| `bad_pairing` | `push test`, `open` | The pairing plan cannot be built: no target Clips, a pairwise Instrument with fewer than 2 targets, duplicate target Clip IDs, or a `session.pairing` other than `all_pairs`. |
+| `bad_practice` | `push test`, `open` | A Practice Clip is not pushed or is also a target, a pairwise example lists the same Clip twice, or an Instrument has fewer than `session.practice_clips` Practice examples. |
 | `clip_kind_overlap` | `push test` | A target Clip is already a target of a registered Test of the other side (`main` vs `pilot`/`screening`). |
-| `media_limit_exceeded` | `push test` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
+| `media_limit_exceeded` | `push test`, `open` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
+| `unknown_test` | `open` | The Test is not registered (or there is no `board.db` yet). |
+| `protocol_lock_unavailable` | `open` | The Test is `kind: main` (main Tests open only once the Protocol lock exists, Epic 4), or is otherwise registered as not openable. |
+| `bad_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0. |
+| `unknown_prompt_variant` | `open` | A Trial's Prompt variant is not defined by its Instrument (an internal consistency check). |
+| `run_unavailable` | `open` | `open` without `--dry-run`; dispatch arrives in story 1.7. |
 | `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
 
 ## Study folder layout
@@ -228,6 +299,8 @@ Table `test_clips` (version 2), one row per Test and Clip it uses: `test`, `clip
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
+Read-only commands (`open --dry-run`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
+
 ### `blinding_key.csv`
 
 The only place Conditions exist. Long CSV with header `clip_id,factor,level`, one row per Clip and factor, appended (and fsynced) by `push clip`. A Clip pushed with no Condition has no rows. The file is created by the first push that has a Condition. Only the push and export stages read it.
@@ -295,7 +368,7 @@ Every sentence and phrase must be a single line (no line break of any kind, incl
 
 ### Seeds
 
-`study.yaml` `seed` is the only seed. Every other seed is derived as `int(sha256("<seed>:<purpose>:<key>").hexdigest()[:8], 16) & 0x7FFFFFFF` (the first 8 hex digits of the SHA-256, masked to 31 bits) and used only through Python's `random.Random(seed)`. Persona quotas use purpose `personas` with the attribute name as key (for example `1:personas:gender`).
+`study.yaml` `seed` is the only seed. Every other seed is derived as `int(sha256("<seed>:<purpose>:<key>").hexdigest()[:8], 16) & 0x7FFFFFFF` (the first 8 hex digits of the SHA-256, masked to 31 bits) and used only through Python's `random.Random(seed)`. Persona quotas use purpose `personas` with the attribute name as key (for example `1:personas:gender`). Trial order uses purpose `order` with the Session ID as key (for example `1:order:pilot1/p12-m1/r2`).
 
 ### `tests/<name>.yaml`
 
@@ -310,7 +383,7 @@ Every sentence and phrase must be a single line (no line break of any kind, incl
 | `practice` | Practice examples (default `[]`): each `{instrument, clips, answer}`. `instrument` must be one of the Test's `instruments` (else `unknown_instrument`, field `practice.<i>.instrument`); `clips` is exactly 1 Clip ID, or 2 for a pairwise Instrument; `answer` maps Item id to the intended value and must pass the Instrument's response schema (else `config_invalid`, field `practice.<i>.clips` or `practice.<i>.answer.<item>`). Each Instrument needs at least `session.practice_clips` examples; the first ones in list order are used (count and Clip existence checked by `push test`, `bad_practice`). Practice clips may be shared between pilot and main Tests. |
 | `session` | Optional overrides of any `study.yaml` `session` key (`practice_clips`, `repeats`, `max_retries`, `pairing`). |
 
-Prompt variants are not chosen in the Test; they rotate by Repeat (story 1.6).
+Prompt variants are not chosen in the Test; they rotate by Repeat (see [Sessions and Trials](#sessions-and-trials)).
 
 ### `prices.yaml`
 

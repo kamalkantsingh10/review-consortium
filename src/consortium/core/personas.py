@@ -125,7 +125,7 @@ def _below(rng: random.Random, n: int) -> int:
             return r
 
 
-def fisher_yates(items: list[str], rng: random.Random) -> None:
+def fisher_yates[T](items: list[T], rng: random.Random) -> None:
     """Shuffle ``items`` in place; depends only on ``rng.getrandbits``."""
     for i in range(len(items) - 1, 0, -1):
         j = _below(rng, i + 1)

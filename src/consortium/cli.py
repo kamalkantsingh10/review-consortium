@@ -13,6 +13,7 @@ from typer.core import TyperGroup
 from consortium.core.errors import ConsortiumError
 from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
+from consortium.stages.open import open_test
 from consortium.stages.push import push_clip, push_test
 
 
@@ -103,3 +104,23 @@ def personas_generate_cmd(
     """Write panel/personas/p<n>.md cards and index.json from study.yaml's seed and frame."""
     personas = personas_stage.generate(study, force=force)
     typer.echo(f"{len(personas)} personas -> {personas_stage.PERSONAS_DIR}")
+
+
+@app.command("open")
+def open_cmd(
+    test: Annotated[str, typer.Argument(help="Name of a registered Test.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Plan and render every Trial, print counts, write nothing."),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+    ceiling: Annotated[
+        str | None, typer.Option("--ceiling", help="Cost ceiling in USD, e.g. 5.00.")
+    ] = None,
+    resume: Annotated[bool, typer.Option("--resume", help="Resume an open Test.")] = False,
+    study: StudyOption = Path("."),
+) -> None:
+    """Plan and render TEST's Trials (with --dry-run: print counts, change nothing)."""
+    summary = open_test(study, test, dry_run=dry_run, yes=yes, ceiling=ceiling, resume=resume)
+    for line in summary.lines():
+        typer.echo(line)
