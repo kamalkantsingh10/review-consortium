@@ -127,7 +127,7 @@ Kamal can create a Study, generate a Persona pool, push Clips blind, define a Te
 
 ### Epic 2: Real AI raters (Gemini and Qwen)
 Kamal can run the same pipeline against real models, Gemini and hosted `qwen3.8-omni-flash`, with pinned settings, per-Model media limits, real cost, and robust handling of rate limits, errors and refusals.
-**FRs covered:** FR8, FR9
+**FRs covered:** FR8, FR9, FR4 (Panel sizing)
 
 ### Epic 3: Screened, reusable Panel
 Kamal can screen Agents for Persona fidelity and Models for construct-level perception. Only eligible Agents rate. The Panel is reused across Tests, invalidated when a Model or Instrument changes, and can be copied into a new Study.
@@ -500,6 +500,27 @@ So that I have a second Model now and can move to self-hosted weights later by c
 **When** it is collected
 **Then** the raw response, the audio and video token usage, and the actual cost are recorded as in Story 2.2, and errors map to `transient`, `refused` or `fatal`
 **And** tests use a recorded-response double, with a live smoke test only when a key is present
+
+### Story 2.4: Panel size by fraction or replicates
+
+As Kamal,
+I want to size the Persona Panel as a fraction or a multiple of the Big Five grid,
+So that I can trade cost against design resolution without breaking the factorial structure.
+
+**Acceptance Criteria:**
+
+**Given** `study.yaml` `personas.big_five` with `fraction` (1, 1/2 or 1/4) and `replicates` (1, 2 or 3)
+**When** I run `consortium personas generate`
+**Then** the Big Five profiles are the full grid (32), the standard resolution-V half-fraction (16, 2^(5-1), E = ABCD) or the resolution-III quarter-fraction (8, 2^(5-2)). Each profile is crossed with every NARS band and repeated `replicates` times, each copy with its own demographic draw.
+**And** quota balancing stays stratified within NARS bands, and `meta.json` records the fraction, the generator relations and the replicates
+
+**Given** a fractional design
+**When** the Panel is generated
+**Then** `INTERFACE.md` and `meta.json` state which effects are aliased (half: none below 3-way; quarter: main effects aliased with two-way interactions), so the paper can report the design honestly
+
+**Given** `board.db` already holds Trials that reference Persona IDs
+**When** I run `personas generate --force`
+**Then** it refuses with `panel_in_use`, because regenerating would silently re-label past responses (deferred from Story 1.3)
 
 ## Epic 3: Screened, reusable Panel
 

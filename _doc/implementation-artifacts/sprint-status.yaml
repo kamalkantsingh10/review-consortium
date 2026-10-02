@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-02-2026 02:07
-last_updated: 10-02-2026 05:51
+last_updated: 10-02-2026 10:31
 project: review-consortium
 project_key: NOKEY
 tracking_system: file-system
@@ -54,6 +54,7 @@ development_status:
   2-1-provider-failure-handling-and-refusals: backlog
   2-2-gemini-adapter: backlog
   2-3-qwen-adapter-openai-compatible: backlog
+  2-4-panel-size-by-fraction-or-replicates: backlog
   epic-2-retrospective: optional
 
   epic-3: backlog
