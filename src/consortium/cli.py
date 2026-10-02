@@ -134,10 +134,13 @@ def open_cmd(
     ceiling: Annotated[
         str | None, typer.Option("--ceiling", help="Cost ceiling in USD, e.g. 5.00.")
     ] = None,
-    resume: Annotated[bool, typer.Option("--resume", help="Resume an open Test.")] = False,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Continue a stopped Run of TEST at Trial level.")
+    ] = False,
     study: StudyOption = Path("."),
 ) -> None:
-    """Plan, render and run TEST's Trials (with --dry-run: print counts, change nothing)."""
+    """Plan, render and run TEST's Trials (--dry-run: print counts, change nothing;
+    --resume: continue a stopped Run without re-sending completed Trials)."""
     announced: list[str] = []
 
     def announce(lines: list[str]) -> None:  # printed before dispatch starts

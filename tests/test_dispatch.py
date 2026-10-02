@@ -301,15 +301,6 @@ def test_other_provider_unavailable(study: Path) -> None:
     assert not (study / LOCK_FILE).exists()
 
 
-def test_resume_not_available_yet(study: Path) -> None:
-    result = _cli("pilot1", "--yes", "--resume", "--study", str(study))
-    assert result.exit_code == 1
-    assert result.stderr.startswith("resume_unavailable:")
-    _nothing_written(study)
-    dry = _cli("pilot1", "--dry-run", "--resume", "--study", str(study))
-    assert dry.exit_code == 0, dry.stderr
-
-
 def test_dry_run_on_open_test(study: Path) -> None:
     before = _cli("pilot1", "--dry-run", "--study", str(study)).stdout
     assert _cli("pilot1", "--yes", "--study", str(study)).exit_code == 0

@@ -125,7 +125,7 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 
 ### `consortium open TEST [--dry-run] [--yes] [--ceiling USD] [--resume] [--study PATH]`
 
-Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used (story 1.9). Without `--dry-run`, `--resume` is refused with `resume_unavailable` until story 1.8; with `--dry-run` it is ignored.
+Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used (story 1.9). Without `--dry-run`, `--resume` continues a stopped Run (see [Resume](#resume)); with `--dry-run` it is ignored.
 
 - `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
 - **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card).
@@ -159,14 +159,14 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
 | The registered file changed while it was being validated | `test_changed`, exit `1` |
 | Config changed since `push test` so the Test no longer passes its checks (for example `session.practice_clips` raised, a Model's `limits` tightened, an Instrument disabled or now pairwise with fewer than 2 targets) | `bad_practice`, `media_limit_exceeded`, `unknown_instrument` or `bad_pairing`, exit `1` |
 | `--ceiling` not a decimal amount greater than 0 | `bad_ceiling`, exit `1` |
-| `--resume` without `--dry-run` | `resume_unavailable`, exit `1`, nothing happens (story 1.8) |
+| `--resume` without `--dry-run` | Continues a stopped Run; see [Resume](#resume) |
 
 #### Run
 
 `open TEST` without `--dry-run` does everything a dry run does (same checks, same plan, same requests, so the Run dispatches exactly the requests behind the dry run's `requests sha256`), then, in order:
 
 1. Refuses a `kind: main` Test (`protocol_lock_unavailable`, see above) and any Model whose provider has no adapter yet (`provider_unavailable`; only `fake` exists in this version). Nothing is written and no `board.lock` is created. If `board.db` is at an older layout version, the Run first takes the lease, migrates it, and releases the lease (a dry run never migrates).
-2. Refuses a Test that already has Trials in `board.db`: `test_already_open`, nothing written (resuming a Run arrives in story 1.8). A dry run of an open Test still works.
+2. Refuses a Test that already has Trials in `board.db`: `test_already_open`, nothing written (continue a stopped Run with `--resume`). A dry run of an open Test still works.
 3. Asks on stderr, before taking the lease (default no):
 
    ```text
@@ -180,11 +180,11 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
 
 Per attempt, in this order: (1) `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)); (2) the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the Trial takes its terminal state: category `ok` gives `valid`, any other category `failed` (response validation arrives in story 1.10). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
 
-**State after a stopped Run (resume contract, story 1.8).** Every Trial is in one of these states, and resume handles each:
+**State after a stopped Run (resume contract).** Every Trial is in one of these states, and `--resume` handles each (see [Resume](#resume)):
 
 - `planned` with `attempt` `0`: never dispatched; dispatch it.
 - `planned` with `attempt >= 1`: stopped between recording the attempt and marking it `sent`. Its attempt row has no `sent_at`, and the request may already be archived. Re-dispatch it with a new attempt (the old attempt number is never reused).
-- `sent` with a handle: submitted; collect it.
+- `sent` with a handle: submitted; collect it at the same attempt.
 - `sent` without a handle: stopped while submitting (the request is archived); re-dispatch it with a new attempt.
 - terminal (`valid`, `invalid`, `refused`, `failed`): done; it always has its response line.
 
@@ -207,9 +207,48 @@ states: valid 3072
 | No `--yes`, answer `n` (or anything but yes) | `not_confirmed`, exit `1`; no Trial stored, no Archive written |
 | No `--yes`, stdin not a terminal | `confirmation_required`, exit `1`; no Trial stored, no Archive written |
 | Another dispatching command holds `board.lock` | `study_busy`, exit `1`; nothing written |
-| The Test already has Trials | `test_already_open`, exit `1`; nothing written |
+| The Test already has Trials | `test_already_open` (`...; use --resume to continue it`), exit `1`; nothing written |
 | `kind: main` Test | `protocol_lock_unavailable`, exit `1`; nothing written |
 | A Model of the Test uses a provider other than `fake` | `provider_unavailable`, exit `1`; nothing written |
+
+#### Resume
+
+`open TEST --resume` continues a stopped Run (killed, crashed or failed) at Trial level, through the same engine. It never re-plans and never re-orders: every stored Trial is **re-rendered** from its `board.db` row plus the current Study folder (Persona card, Instrument, Practice examples, Clip hashes), which also proves the Archive can re-issue its requests. In order:
+
+1. The same checks as a Run up to planning (a `kind: main` Test is refused with `protocol_lock_unavailable`; `test_exists`, config, Panel and Clip checks). An older `board.db` layout is migrated under the lease first.
+2. Refuses a Test with no Trials in `board.db`: `test_not_open`, nothing written.
+3. Takes Raters only for the Models of the non-terminal Trials (a Model whose Trials are all terminal never blocks a resume): `unknown_model` if one is no longer in `study.yaml`, `provider_unavailable` if its provider has no adapter.
+4. If any Trial is not terminal, asks on stderr as a Run does, counting only the non-terminal Trials (default no; `--yes` skips it; `not_confirmed` / `confirmation_required` as for a Run, nothing written):
+
+   ```text
+   requests sha256: <64 lowercase hex digits>
+   Resume N Trials on <providers>? [y/N]:
+   ```
+
+   `requests sha256` is over every stored Trial's re-rendered request in plan order, so it equals the Run's (and the dry run's) digest when nothing changed. When every Trial is terminal there is nothing to confirm.
+5. Takes the `board.lock` lease (`study_busy` if another dispatcher holds it, nothing written; a killed Run never blocks, since the OS releases its lock). Under the lease it re-checks the Test has Trials (`test_not_open`) and that the Test file's bytes (hashed again), the requests digest, the non-terminal Trials (state, attempt, handle) and the providers are unchanged since the confirmation (else `test_changed`, nothing written).
+6. Runs the **re-issue check** (below); a mismatch is `reissue_mismatch`, nothing written.
+7. Prints the summary lines (as for a Run) plus `resume: collect C, new attempt A, terminal T, archive fragments F` (F = crash fragments skipped in the two Archive files), then sends the non-terminal Trials through the engine:
+   - terminal (`valid`, `invalid`, `refused`, `failed`): untouched, never re-sent;
+   - `sent` whose latest attempt has a stored handle: collected at that same attempt (steps 5 and 6 only: no new attempt, no new request line); its response line carries the archived `request_sha256` (a stored handle that is not a JSON object stops the resume with `adapter_error: stored handle unreadable for <trial_id>`);
+   - `planned` (attempt `0`, or `>= 1` after a stop between recording the attempt and marking it `sent`) and `sent` without a handle: a new attempt (steps 1 to 6, new seed, new request line). Attempt numbers are never reused, and an attempt that was never marked `sent` is never collected.
+
+It ends like a Run: Trials by state, exit `0` (with the `warning:` line if some did not end `valid`). With nothing to resume it dispatches nothing, prints the counts and exits `0`.
+
+**Re-issue check.** It runs under the `board.lock` lease (as `--resume` does), so no dispatcher writes meanwhile. Every attempt marked `sent` must have a request line and no `(trial_id, attempt)` may have more than one (else `reissue_mismatch`). For every `archive/requests.jsonl` line of the Test, the canonical JSON of the request re-rendered from the stored Trial row and the current Study folder must equal the archived `request` bytes, its SHA-256 must equal `request_sha256`, and the line's `seed` and `model_id` must be those of its attempt (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`) and Trial. If a Study input that affects requests (a Persona card, an Instrument, a Clip row) was edited after the Test was opened, the check fails with `reissue_mismatch` instead of mixing request versions.
+
+**Duplicate responses; last line wins.** If a Run dies after a response was appended but before the Trial's state was written, `--resume` collects that attempt again and appends a second response line for the same `(trial_id, attempt)`. This is allowed. Every reader of the Archive keys lines by `(trial_id, attempt)` and takes the **last line per key**; it ignores an unterminated final line and skips (and counts) any line that is not valid JSON (a fragment a crash can leave). A line that is valid JSON but not a record with a string `trial_id` and an integer `attempt` is corruption: `archive_corrupt`. Request lines are the exception to last-line-wins: the re-issue check refuses a repeated request key.
+
+| Situation | Result |
+| --- | --- |
+| Run stopped with Trials `valid`, `planned`, `sent` with handle and `sent` without handle | `valid` untouched; handled `sent` collected at the same attempt; the others get a new attempt; all end `valid`; exit `0` |
+| Stopped after a response was appended, before the state write | Collected again; a second response line for the same key; readers take the last |
+| Stopped after an attempt was recorded, before its request was sent | New attempt `n+1`; attempt `n` is never sent or collected |
+| Every Trial terminal | Nothing dispatched; counts printed; exit `0` |
+| The Test has no Trials | `test_not_open`, exit `1`; nothing written |
+| Another dispatching command holds `board.lock` | `study_busy`, exit `1`; nothing written |
+| An archived request no longer re-renders identically | `reissue_mismatch`, exit `1`; nothing written |
+| `kind: main` Test | `protocol_lock_unavailable`, exit `1` |
 
 #### Sessions and Trials
 
@@ -259,7 +298,7 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
 | `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
 | `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
-| `test_changed` | `push test`, `open` | The Test file changed while it was being validated, or (for a Run) the Test file, its requests or its providers changed between the confirmation and the lease; nothing was registered, planned or stored. |
+| `test_changed` | `push test`, `open` | The Test file changed while it was being validated, or (for a Run or `--resume`) the Test file, its requests, its non-terminal Trials or its providers changed between the confirmation and the lease; nothing was registered, planned or stored. |
 | `test_exists` | `push test`, `open` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
 | `unknown_clip` | `push test`, `open` | A target Clip ID is not in `board.db` (field `clips[i]`), or a Clip a registered Test uses is missing when its Trials are rendered. |
 | `bad_pairing` | `push test`, `open` | The pairing plan cannot be built: no target Clips, a pairwise Instrument with fewer than 2 targets, duplicate target Clip IDs, or a `session.pairing` other than `all_pairs`. |
@@ -272,12 +311,15 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `unknown_prompt_variant` | `open` | A Trial's Prompt variant is not defined by its Instrument (an internal consistency check). |
 | `provider_unavailable` | `open` | A Model of the Test uses a provider with no adapter yet (only `fake` exists in this version). |
 | `study_busy` | `open` | Another dispatching command holds the `board.lock` lease of this Study. |
-| `test_already_open` | `open` | The Test already has Trials in `board.db`; it cannot be opened again. |
+| `test_already_open` | `open` | The Test already has Trials in `board.db`; it cannot be opened again (message ends `; use --resume to continue it`). |
 | `not_confirmed` | `open` | The Run was declined at the confirmation prompt; nothing was stored or sent. |
 | `confirmation_required` | `open` | No `--yes` and stdin is not a terminal, so the Run cannot be confirmed; nothing was stored or sent. |
-| `resume_unavailable` | `open` | `--resume` without `--dry-run`; resume arrives in story 1.8. |
+| `unknown_model` | `open --resume` | A Model of the Test's non-terminal Trials is no longer in `study.yaml`. |
+| `archive_corrupt` | `open --resume` | An Archive line is valid JSON but not a record with a string `trial_id` and an integer `attempt`; the message names `<file>:<line>`. |
+| `test_not_open` | `open --resume` | The Test has no Trials in `board.db`; open it without `--resume` first. |
+| `reissue_mismatch` | `open --resume` | An archived request no longer re-renders byte-identically from its Trial row and the Study folder (a Study input was edited after open), or its `request_sha256`, seed or Model does not match; nothing was sent. |
 | `run_failed` | `open` | The Run stopped on an unexpected error (`<type>: <message>`); see the resume contract under [Run](#run). |
-| `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results). The Run stopped. |
+| `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results), or `--resume` found a stored handle that is not a JSON object. The Run stopped. |
 | `bad_concurrency` | `open` | The engine was given a concurrency below 1 (an internal check; `study.yaml` already requires at least 1). |
 | `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
 
@@ -365,11 +407,11 @@ Read-only commands (`open --dry-run`) open it with SQLite `mode=ro` and never mi
 
 ### `board.lock`
 
-An empty file; `open` (a dispatching command) holds an exclusive `fcntl.flock` on it for the whole command. A second dispatcher refuses with `study_busy`. The lock is released by the OS when the holding process ends, so a leftover file never blocks.
+An empty file; `open` and `open --resume` (dispatching commands) hold an exclusive `fcntl.flock` on it for the whole command. A second dispatcher refuses with `study_busy`. The lock is released by the OS when the holding process ends, so a leftover file never blocks.
 
 ### `archive/requests.jsonl`, `archive/responses.jsonl`
 
-Append-only; never rewritten. One canonical JSON object per line (sorted keys, UTF-8, no whitespace, LF), keyed by `trial_id` + `attempt`; each line is flushed and fsynced before the Run moves on. A request line is written before its Trial is marked `sent`; a response line before the Trial changes state. The `archive/` directory is fsynced when it or a file in it is first created. A crash during an append can leave an unterminated final line: readers ignore it, and the next append first ends it with a newline so it never merges into a new record. Timestamps (`ts`, and `sent_at`/`answered_at` in `board.db`) are UTC ISO 8601 with milliseconds and `Z`.
+Append-only; never rewritten. One canonical JSON object per line (sorted keys, UTF-8, no whitespace, LF), keyed by `trial_id` + `attempt`; each line is flushed and fsynced before the Run moves on. A request line is written before its Trial is marked `sent`; a response line before the Trial changes state. The `archive/` directory is fsynced when it or a file in it is first created. A crash during an append can leave an unterminated final line: readers ignore it, and the next append first ends it with a newline so it never merges into a new record (readers also skip and count such a fragment; a valid JSON line that is not a keyed record is `archive_corrupt`). A key can appear on more than one line (a response collected again by `--resume`, see [Resume](#resume)); every reader takes the **last line per key**. Timestamps (`ts`, and `sent_at`/`answered_at` in `board.db`) are UTC ISO 8601 with milliseconds and `Z`.
 
 - **Request:** `{"attempt", "model_id", "request", "request_sha256", "seed", "trial_id", "ts"}`. `request` is the rendered request object (see [Trial requests](#trial-requests)); `request_sha256` is the SHA-256 of its canonical JSON; `seed` the attempt's Model seed; `ts` UTC ISO 8601 with milliseconds and `Z`.
 - **Response:** `{"attempt", "category", "model_build", "raw", "request_sha256", "trial_id", "ts", "usage"}`. `request_sha256` repeats that of the attempt's request line; `raw` is the Model's raw text, `usage` `{"input_tokens", "output_tokens"}`, `model_build` the provider-reported build (or `null`), `category` `ok` or a snake_case reason.

@@ -19,14 +19,23 @@ lost. This is the only module that calls ``submit`` and ``collect``.
 If any Trial fails, the Run stops: the other Trials are cancelled and the first
 ``ConsortiumError`` is raised unchanged, any other error as ``run_failed``.
 A cancelled Trial can be left ``planned`` with ``attempt >= 1`` (an attempt row
-without ``sent_at``, possibly with an archived request) or ``sent``; resume
-(story 1.8) re-dispatches the former with a new attempt.
+without ``sent_at``, possibly with an archived request) or ``sent``.
+
+**Resume** (story 1.8): ``collect`` maps the ``trial_id`` of every ``sent`` Trial
+whose latest attempt has a stored handle to ``(attempt, handle)``. Such a Trial
+is collected at that same attempt (steps 5-6 only: no new attempt, no new
+request line). Every other Trial passed in (``planned``, with any ``attempt``,
+or ``sent`` without a handle) gets a new attempt through steps 1-6; attempt
+numbers are never reused, and an attempt never marked ``sent`` is never
+collected. Terminal Trials must not be passed in.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -109,12 +118,16 @@ async def dispatch(
     writer: Writer,
     seed: int,
     concurrency: int,
+    collect: Mapping[str, tuple[int, str]] | None = None,
 ) -> None:
     """Send every ``(Trial, TrialRequest)`` through its Model's Rater.
 
     ``seed`` is ``study.seed`` (attempt seeds derive from it); ``concurrency`` is
     the per-provider cap (``StudyConfig.concurrency``). The Trials must already be
-    stored ``planned``. Any error stops the Run (see the module docstring):
+    stored. ``collect`` (resume) maps ``trial_id`` to the ``(attempt, handle JSON
+    text)`` of a ``sent`` attempt to collect instead of re-sending; its response
+    line carries the SHA-256 of ``request``, which the caller has checked equals
+    the archived one. Any error stops the Run (see the module docstring):
     ``bad_concurrency`` for ``concurrency < 1``, ``provider_unavailable`` for a
     Model with no Rater, ``adapter_error``, ``run_failed`` or the adapter's own
     ``ConsortiumError``.
@@ -134,6 +147,11 @@ async def dispatch(
         semaphores.setdefault(rater.provider, asyncio.Semaphore(concurrency))
     prepared = _Prepared()
     shielded: set[asyncio.Future] = set()
+
+    def _settle(task: asyncio.Future) -> None:
+        shielded.discard(task)
+        if not task.cancelled():
+            task.exception()  # retrieved: the awaiting task reports it, or it was cancelled
 
     async def run_one(trial: Trial, request: TrialRequest) -> None:
         rater = rater_by_model[trial.model_id]
@@ -175,32 +193,55 @@ async def dispatch(
 
             inner = asyncio.ensure_future(submit_and_store())
             shielded.add(inner)
-            inner.add_done_callback(shielded.discard)
+            inner.add_done_callback(_settle)
             handle = await asyncio.shield(inner)
-            result = _one(await rater.collect([handle]), "collect", rater.provider)
-            await writer.do(
-                "append_response",
-                lambda _conn: append_response(
-                    study, trial_id=tid, attempt=attempt,
-                    request_sha256=request_record["request_sha256"],
-                    raw=result.raw, usage=result.usage,
-                    model_build=result.model_build, category=result.category,
-                ),
-                tid, attempt,
+            await finish(rater, tid, attempt, handle, request_record["request_sha256"])
+
+    async def finish(
+        rater: Rater, tid: str, attempt: int, handle: Handle, request_sha256: str
+    ) -> None:
+        result = _one(await rater.collect([handle]), "collect", rater.provider)
+        await writer.do(
+            "append_response",
+            lambda _conn: append_response(
+                study, trial_id=tid, attempt=attempt, request_sha256=request_sha256,
+                raw=result.raw, usage=result.usage,
+                model_build=result.model_build, category=result.category,
+            ),
+            tid, attempt,
+        )
+        await writer.do(
+            "set_state",
+            functools.partial(
+                board_trials.set_state, trial_id=tid, attempt=attempt,
+                state=state_for(result), category=result.category,
+            ),
+            tid, attempt,
+        )
+
+    async def collect_one(trial: Trial, request: TrialRequest, attempt: int, handle: str) -> None:
+        """Resume a ``sent`` attempt with a handle: collect it, never re-send it."""
+        rater = rater_by_model[trial.model_id]
+        request_sha256 = hashlib.sha256(canonical_json(request)).hexdigest()
+        try:
+            parsed = json.loads(handle)
+        except (TypeError, ValueError):
+            parsed = None
+        if not isinstance(parsed, dict):
+            raise ConsortiumError(
+                "adapter_error", f"stored handle unreadable for {trial.trial_id}"
             )
-            await writer.do(
-                "set_state",
-                functools.partial(
-                    board_trials.set_state, trial_id=tid, attempt=attempt,
-                    state=state_for(result), category=result.category,
-                ),
-                tid, attempt,
-            )
+        async with semaphores[rater.provider]:
+            await finish(rater, trial.trial_id, attempt, parsed, request_sha256)
 
     try:
         async with asyncio.TaskGroup() as group:
             for trial, request in trials:
-                group.create_task(run_one(trial, request))
+                resumed = collect.get(trial.trial_id) if collect else None
+                if resumed is None:
+                    group.create_task(run_one(trial, request))
+                else:
+                    group.create_task(collect_one(trial, request, *resumed))
     except BaseExceptionGroup as group_error:
         err = _first_error(group_error)
         if isinstance(err, ConsortiumError) or not isinstance(err, Exception):

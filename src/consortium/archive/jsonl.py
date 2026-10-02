@@ -5,7 +5,15 @@ appear only as Clip ID + SHA-256 (the rendered request carries nothing else).
 Every append is flushed and fsynced before it returns (and the ``archive/``
 directory is fsynced when it or a file in it is first created). If a crash left
 an unterminated last line, the next append first ends it with ``\n``, so it
-never merges into the new record; readers ignore an unterminated final line.
+never merges into the new record; readers ignore an unterminated final line
+and skip (and count) any line that is not valid JSON, the fragment such a
+crash leaves; a line that parses but is not a keyed record is
+``archive_corrupt``.
+
+Readers (``read_requests``, ``read_responses``) key records by
+``(trial_id, attempt)`` and take the **last line per key**: a Run killed
+after a response append but before the Trial's state write appends a second
+response line for the same key when it is resumed, and that line wins.
 Inside a dispatching command, appends run on the writer task only.
 """
 
@@ -13,16 +21,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from consortium.core.clock import utc_now_ms
+from consortium.core.errors import ConsortiumError
 from consortium.core.render import TrialRequest, canonical_json
 
 ARCHIVE_DIR = "archive"
 REQUESTS_FILE = f"{ARCHIVE_DIR}/requests.jsonl"
 RESPONSES_FILE = f"{ARCHIVE_DIR}/responses.jsonl"
+
+Key = tuple[str, int]  # (trial_id, attempt)
+
+log = logging.getLogger(__name__)
 
 
 def _fsync_dir(path: Path) -> None:
@@ -113,3 +127,61 @@ def append_response(
     _append(study_dir, RESPONSES_FILE, record)
     return record
 
+
+
+def read_lines(study_dir: Path | str, rel: str) -> tuple[list[dict[str, Any]], int]:
+    """Every record of the Archive file ``rel`` in file order, and the number of fragments.
+
+    A fragment is a line that is not valid JSON (what a crash mid-append leaves);
+    it is skipped and counted. An unterminated final line is ignored (not
+    counted). A line that parses but is not an object with a string
+    ``trial_id`` and an integer ``attempt`` is corruption: ``archive_corrupt``.
+    """
+    path = Path(study_dir) / rel
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return [], 0
+    lines = data.split(b"\n")
+    lines.pop()  # empty after a final "\n", else an unterminated last line: ignored
+    records: list[dict[str, Any]] = []
+    fragments = 0
+    for number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            log.warning("%s line %d: a fragment, not a JSON record; skipped", rel, number)
+            fragments += 1
+            continue
+        if not (
+            isinstance(record, dict)
+            and isinstance(record.get("trial_id"), str)
+            and isinstance(record.get("attempt"), int)
+            and not isinstance(record.get("attempt"), bool)
+        ):
+            raise ConsortiumError(
+                "archive_corrupt",
+                f"{rel}:{number}: not a record with a string trial_id and an integer attempt",
+                path=rel,
+            )
+        records.append(record)
+    return records, fragments
+
+
+def _read(study_dir: Path | str, rel: str) -> dict[Key, dict[str, Any]]:
+    out: dict[Key, dict[str, Any]] = {}
+    for record in read_lines(study_dir, rel)[0]:
+        key = (record["trial_id"], record["attempt"])
+        out.pop(key, None)  # re-insert, so the dict follows the order of the winning lines
+        out[key] = record
+    return out
+
+
+def read_requests(study_dir: Path | str) -> dict[Key, dict[str, Any]]:
+    """Every ``archive/requests.jsonl`` record by ``(trial_id, attempt)``; last line wins."""
+    return _read(study_dir, REQUESTS_FILE)
+
+
+def read_responses(study_dir: Path | str) -> dict[Key, dict[str, Any]]:
+    """Every ``archive/responses.jsonl`` record by ``(trial_id, attempt)``; last line wins."""
+    return _read(study_dir, RESPONSES_FILE)

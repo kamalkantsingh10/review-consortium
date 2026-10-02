@@ -40,7 +40,10 @@ def insert_plan(conn: sqlite3.Connection, test: str, trials: Iterable[Trial]) ->
     """
     with transaction(conn):
         if count_trials(conn, test):
-            raise ConsortiumError("test_already_open", f"Test {test!r} already has Trials")
+            raise ConsortiumError(
+                "test_already_open",
+                f"Test {test!r} already has Trials; use --resume to continue it",
+            )
         rows = []
         for seq, t in enumerate(trials):
             if t.test != test:
@@ -73,6 +76,50 @@ def load_trials(conn: sqlite3.Connection, test: str) -> list[dict]:
         d["clip_ids"] = tuple(json.loads(d["clip_ids"]))
         out.append(d)
     return out
+
+
+def trial_from_row(row: dict) -> Trial:
+    """The ``core.plan.Trial`` stored in a ``load_trials`` / ``load_resumable`` row."""
+    return Trial(**{name: row[name] for name in _TRIAL_COLUMNS})
+
+
+def load_resumable(conn: sqlite3.Connection, test: str) -> list[dict]:
+    """Every non-terminal Trial of ``test`` in plan order, for resume (story 1.8).
+
+    Each row is a ``load_trials`` row plus ``handle``: the stored handle (JSON
+    text) of the Trial's latest attempt (``attempt``) if that attempt was marked
+    ``sent`` and has one, else ``None``. A ``planned`` Trial's attempt, never
+    marked ``sent``, is never collected, so its handle is always ``None``.
+    """
+    out = []
+    for row in load_trials(conn, test):
+        if row["state"] in TERMINAL_STATES:
+            continue
+        handle = None
+        if row["state"] == "sent":
+            found = conn.execute(
+                "SELECT handle FROM attempts WHERE trial_id = ? AND attempt = ?"
+                " AND sent_at IS NOT NULL",
+                (row["trial_id"], row["attempt"]),
+            ).fetchone()
+            handle = found[0] if found else None
+        out.append({**row, "handle": handle})
+    return out
+
+
+def attempt_seeds(conn: sqlite3.Connection, test: str) -> dict[tuple[str, int], tuple[int, bool]]:
+    """``(trial_id, attempt) -> (seed, sent)`` for every recorded attempt of ``test``.
+
+    ``sent`` is true when the attempt was marked ``sent`` (it has ``sent_at``).
+    """
+    return {
+        (trial_id, attempt): (seed, sent_at is not None)
+        for trial_id, attempt, seed, sent_at in conn.execute(
+            "SELECT a.trial_id, a.attempt, a.seed, a.sent_at FROM attempts a"
+            " JOIN trials t ON t.trial_id = a.trial_id WHERE t.test = ?",
+            (test,),
+        )
+    }
 
 
 def begin_attempt(conn: sqlite3.Connection, trial_id: str, study_seed: int) -> tuple[int, int]:

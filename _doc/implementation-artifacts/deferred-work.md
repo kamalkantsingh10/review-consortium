@@ -9,3 +9,9 @@
 - source_spec: `_doc/implementation-artifacts/spec-1-5-push-a-test.md`
   summary: The init template's tests/example.yaml has practice: [] while session.practice_clips defaults to 2, so it can never be pushed. Fix it as part of the bundled example Study (Story 4.5).
   evidence: The verification-gap review on 1.5; push test refuses with bad_practice on a fresh Study.
+- source_spec: `_doc/implementation-artifacts/spec-1-8-resume-a-run-and-verify-re-issue.md`
+  summary: Recovery for a stored handle the provider can no longer collect (expired or deleted), e.g. give that Trial a new attempt after a categorised collect failure. Add a collect-path concurrency test with the first real adapter.
+  evidence: Today every --resume re-collects the same dead handle and stops. This only matters once real adapters exist (Epic 2).
+- source_spec: `_doc/implementation-artifacts/spec-1-8-resume-a-run-and-verify-re-issue.md`
+  summary: Expose the re-issue check as a CLI command (e.g. `consortium verify <test>`) and report the verified line count. It belongs with the Reporting manifest (Epic 4).
+  evidence: FR24 "verify re-issue" is currently only callable from Python, and runs as a side effect of --resume.

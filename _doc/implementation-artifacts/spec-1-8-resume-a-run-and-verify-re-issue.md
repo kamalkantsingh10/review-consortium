@@ -2,7 +2,8 @@
 title: 'Story 1.8 — Resume a Run and verify re-issue'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '2277f21287757dc666859be32964d30be4b8b1d6'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -54,6 +55,14 @@ context:
 
 ## Code Map
 
+- **As built by Story 1.7 (commit 2277f21); build on these:**
+  - `docs/INTERFACE.md` already defines the resume contract for every state a stopped Run can leave, including **`planned` with attempt ≥ 1** (re-dispatch with a new attempt; the request may or may not be archived). Implement exactly that contract.
+  - `--resume` currently raises `resume_unavailable` for a Run; replace that.
+  - Each response record carries `request_sha256`.
+  - A Run plans twice (before the prompt, and under the lease) and compares digests (`test_changed`).
+  - `engine/dispatch.py` shields submit+set_handle, unwraps errors to ConsortiumError (`run_failed`/`adapter_error`), and keeps the writer alive until shielded tasks finish.
+  - `board.writer.migrate()` upgrades old layouts.
+  - Timestamps come from `core/clock.utc_now_ms()`.
 - `src/consortium/engine/dispatch.py`, `board/writer.py`, `board/trials.py`, `board/lease.py`, `archive/jsonl.py` (1.7) -- extended here.
 - `src/consortium/stages/open.py`, `cli.py` (1.6, 1.7) -- `--resume` flag already in the signature.
 - `src/consortium/core/render.py` (1.6) -- `render`, `canonical_json`.
@@ -61,12 +70,12 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/board/trials.py` -- load non-terminal Trials with their latest attempt and handle. -- Resume input.
-- [ ] `src/consortium/archive/jsonl.py` -- `read_requests(study_dir)` and `read_responses(study_dir)`, each keyed by `(trial_id, attempt)` with last-line-wins. -- Single reader rule.
-- [ ] `src/consortium/engine/dispatch.py` -- accept resumed Trials: collect-at-same-attempt for handled `sent`, new attempt otherwise. -- FR18.
-- [ ] `src/consortium/stages/open.py`, `src/consortium/cli.py` -- `--resume` flow: refusals, re-render from stored rows, confirmation, dispatch. -- Use case.
-- [ ] `docs/INTERFACE.md` -- `--resume`, the resume rules, last-line-wins. -- Definition of done.
-- [ ] `tests/test_resume.py` -- every matrix row; kill simulated by stopping dispatch after a chosen writer op (each op in turn), then resuming.
+- [x] `src/consortium/board/trials.py` -- load non-terminal Trials with their latest attempt and handle. -- Resume input.
+- [x] `src/consortium/archive/jsonl.py` -- `read_requests(study_dir)` and `read_responses(study_dir)`, each keyed by `(trial_id, attempt)` with last-line-wins. -- Single reader rule.
+- [x] `src/consortium/engine/dispatch.py` -- accept resumed Trials: collect-at-same-attempt for handled `sent`, new attempt otherwise. -- FR18.
+- [x] `src/consortium/stages/open.py`, `src/consortium/cli.py` -- `--resume` flow: refusals, re-render from stored rows, confirmation, dispatch. -- Use case.
+- [x] `docs/INTERFACE.md` -- `--resume`, the resume rules, last-line-wins. -- Definition of done.
+- [x] `tests/test_resume.py` -- every matrix row; kill simulated by stopping dispatch after a chosen writer op (each op in turn), then resuming.
 
 **Acceptance Criteria:**
 - Given a Run killed after any writer op and then resumed, when the Archive and `board.db` are compared, then every `sent` attempt has a request line, every terminal Trial has a response line for its final attempt, and no completed Trial got a new attempt.
@@ -76,6 +85,25 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC | A sent attempt with no request line passes re-issue | medium | patch |
+| 2 | BH | Duplicate request lines hidden by last-wins | medium | patch |
+| 3 | BH, EC | Mid-file corruption silently skipped; bool attempt | medium | patch (archive_corrupt; fragments counted) |
+| 4 | EC | Removed Model gives a KeyError; terminal-only Models block resume | medium | patch (unknown_model) |
+| 5 | EC | Test edit between confirm and lease reports test_exists, not test_changed | low | patch |
+| 6 | EC | Unreadable stored handle gives a generic run_failed | low | patch (adapter_error) |
+| 7 | EC | AssertionError on inconsistent Sessions | low | patch (board_unreadable) |
+| 8 | BH | check_reissue has no lease; docs' error order differs | low | patch (docs) |
+| 9 | BH | test_already_open gives no --resume hint | low | patch |
+| 10 | VG, BH | Seed, sha, model_id and missing-line mismatches; double-resume; old layout; Trials changed after confirm; collect failure — all untested | medium | patch (tests) |
+| 11 | BH, EC | Dead or expired handle has no fallback, so resume is stuck forever | medium | defer (real adapters, Epic 2) |
+| 12 | VG | Collect path not covered by a concurrency test | low | defer (first real adapter) |
+| 13 | BH | No CLI command to run the re-issue check on its own | medium | defer (Epic 4 defensibility, alongside the manifest) |
+| 14 | BH | Warnings on stderr | false | Logs go to stderr by design (INTERFACE.md conventions); the code: message contract is for errors |
+| 15 | BH | N+1 queries / Trials loaded twice | low | Rejected: performance only at pilot scale |
+| 16 | BH | _settle callback untested | low | Rejected: exercised by the kill tests |
 
 ## Design Notes
 
