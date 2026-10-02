@@ -1,0 +1,5 @@
+# Study configuration. The full schema arrives in story 1.2.
+seed: 1
+models:
+  - id: m1
+    provider: fake

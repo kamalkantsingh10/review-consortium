@@ -1,0 +1,68 @@
+[project]
+name = "consortium"
+version = "0.1.0"
+description = "Blinded study pipeline for rating robot clips with LLM rater panels"
+readme = "README.md"
+authors = [
+    { name = "Kamal Singh", email = "kamalkantsingh10@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.13,<2.14",
+    "pyyaml>=6,<7",
+    "typer>=0.27,<0.28",
+]
+
+[project.scripts]
+consortium = "consortium.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.9,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15,<2.16",
+    "pytest>=9.1,<9.2",
+    "ruff>=0.16,<0.17",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Block ROS launch_testing plugins that leak in via a sourced ROS PYTHONPATH and fail to import.
+addopts = "-p no:launch_testing -p no:launch_ros"
+
+[tool.importlinter]
+root_package = "consortium"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "AD-1 dependency direction"
+type = "layers"
+containers = ["consortium"]
+layers = [
+    "cli",
+    "stages",
+    "engine",
+    "raters | board | archive | media | config",
+    "core",
+]
+
+[[tool.importlinter.contracts]]
+name = "AD-1 stages never import one another"
+type = "independence"
+modules = ["consortium.stages.*"]
+
+[[tool.importlinter.contracts]]
+name = "AD-1 core imports only stdlib and pydantic"
+type = "forbidden"
+source_modules = ["consortium.core"]
+forbidden_modules = ["yaml", "typer"]

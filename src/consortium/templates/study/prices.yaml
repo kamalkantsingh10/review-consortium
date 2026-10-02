@@ -1,0 +1,5 @@
+# Per-Model prices in USD (decimal strings). The fake Model is free.
+models:
+  m1:
+    provider: fake
+    price: "0"
