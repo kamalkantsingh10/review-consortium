@@ -2,13 +2,21 @@
   "$defs": {
     "FakeSettings": {
       "additionalProperties": false,
-      "description": "What the Fake rater reports as usage for each answer (story 1.9).",
+      "description": "What the Fake rater reports as usage for each answer (story 1.9) and how often\nit answers invalidly (story 1.10).",
       "properties": {
         "input_tokens": {
           "default": 0,
           "minimum": 0,
           "title": "Input Tokens",
           "type": "integer"
+        },
+        "invalid_rate": {
+          "default": 0.0,
+          "description": "Probability (0-1) that an attempt's answer is invalid; decided per attempt seed, so deterministic.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Invalid Rate",
+          "type": "number"
         },
         "output_tokens": {
           "default": 0,

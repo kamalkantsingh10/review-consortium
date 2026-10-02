@@ -408,7 +408,7 @@ def test_migrates_v1_board(study: Path, tmp_path: Path) -> None:
                  session={"practice_clips": 0})
     assert push_test(study, src) == "t1"
     with sqlite3.connect(study / DB_FILE) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 5
 
 
 # --------------------------------------------------------------------------- check_media

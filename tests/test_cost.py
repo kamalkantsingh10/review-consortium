@@ -354,7 +354,7 @@ def test_only_worst_case_over_runs(study: Path) -> None:
 def _to_gemini(study: Path) -> None:
     cfg = study / "study.yaml"
     text = cfg.read_text()
-    start, end = text.index("    fake:"), text.index("      output_tokens:")
+    start, end = text.index("    fake:"), text.index("      invalid_rate:")
     text = text[:start] + text[text.index("\n", end) + 1:]
     cfg.write_text(text.replace("provider: fake ", "provider: gemini ", 1))
 
@@ -482,7 +482,8 @@ def _engine_pause(study: Path, ceiling: Decimal, concurrency: int) -> str | None
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await writer.do("set_ceiling", lambda c: set_ceiling(c, ceiling, "pilot1", "run"))
             return await dispatch(study, pairs, {"m1": _NoUsageRater()}, writer=writer,
-                                  seed=1, concurrency=concurrency, budget=budget)
+                                  seed=1, concurrency=concurrency, budget=budget,
+                                  max_retries=2)
 
     return asyncio.run(run())
 
@@ -736,6 +737,8 @@ def test_resume_on_downgraded_board_ledgers_collected_attempts(study: Path) -> N
     raw.execute("DROP TABLE ledger")
     raw.execute("DROP TABLE ceiling_changes")
     raw.execute("ALTER TABLE tests DROP COLUMN paused_reason")
+    for column in ("valid", "invalid_reason", "answer_json"):  # m5 (story 1.10)
+        raw.execute(f"ALTER TABLE attempts DROP COLUMN {column}")
     raw.execute("PRAGMA user_version = 3")
     raw.close()
     summary = open_test(study, "pilot1", dry_run=False, yes=True, resume=True, ceiling="100")

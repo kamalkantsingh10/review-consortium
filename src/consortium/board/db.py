@@ -140,8 +140,22 @@ def m4_cost(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE tests ADD COLUMN paused_reason TEXT")
 
 
+def m5_validation(conn: sqlite3.Connection) -> None:
+    """Story 1.10: each attempt's validation (``core.validate``).
+
+    ``valid`` is 1 or 0 once the attempt's response was validated, NULL before;
+    ``invalid_reason`` is the ``invalid_response`` reason of an invalid attempt;
+    ``answer_json`` is the parsed answer of a valid attempt as canonical JSON.
+    """
+    conn.execute(
+        "ALTER TABLE attempts ADD COLUMN valid INTEGER CHECK (valid IS NULL OR valid IN (0, 1))"
+    )
+    conn.execute("ALTER TABLE attempts ADD COLUMN invalid_reason TEXT")
+    conn.execute("ALTER TABLE attempts ADD COLUMN answer_json TEXT")
+
+
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
-    m1_clips, m2_tests, m3_trials, m4_cost,
+    m1_clips, m2_tests, m3_trials, m4_cost, m5_validation,
 ]
 
 

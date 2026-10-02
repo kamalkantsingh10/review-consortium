@@ -49,7 +49,7 @@ TARGETS = ["c_aaaaaaaa", "c_bbbbbbbb"]
 PRACTICE = ["c_ppppppaa", "c_ppppppab", "c_ppppppac"]
 GODSPEED = {f"animacy_{i}": 3 for i in range(1, 7)} | {f"likeability_{i}": 3 for i in range(1, 6)}
 STEPS = ["begin_attempt", "append_request", "mark_sent", "set_handle", "append_response",
-         "record_actual", "set_state"]
+         "record_actual", "record_validation", "set_state"]
 FOOTER = "cost: committed 0 USD, ceiling none"
 TRIALS = 64 * (2 + 2)  # 64 Personas x 1 Model x 1 Repeat x (2 godspeed + 2 pairwise)
 KILL_AT = 37  # the k-th occurrence of the chosen writer op is the last write before the kill
@@ -283,7 +283,7 @@ def test_resume_after_kill_mixed_states(study: Path) -> None:
     ops: list[tuple[str, tuple]] = []
     summary = _resume(study, writer_spy=lambda op, key: ops.append((op, key)))
     assert summary.states == {"valid": TRIALS}
-    assert summary.resumed == {"collect": 1, "new attempt": TRIALS - 2, "terminal": 1,
+    assert summary.resumed == {"collect": 1, "new attempt": TRIALS - 2, "settled": 0, "terminal": 1,
                                "archive fragments": 0}
     _assert_resumed_correctly(study, before)
 
@@ -299,7 +299,7 @@ def test_resume_after_kill_mixed_states(study: Path) -> None:
     # The handled Trial was only collected: append_response then set_state, attempt 1.
     assert [(op, key) for op, key in ops if key and key[0] == ids["sent_handle"]] == [
         ("append_response", (ids["sent_handle"], 1)), ("record_actual", (ids["sent_handle"], 1)),
-        ("set_state", (ids["sent_handle"], 1))]
+        ("record_validation", (ids["sent_handle"], 1)), ("set_state", (ids["sent_handle"], 1))]
     # Its response carries the archived request's SHA-256.
     tid = ids["sent_handle"]
     assert read_responses(study)[(tid, 1)]["request_sha256"] == \
@@ -369,7 +369,8 @@ def test_all_terminal_dispatches_nothing(study: Path) -> None:
     assert result.exit_code == 0, result.stderr
     out = result.stdout.splitlines()
     assert out[0] == "test: pilot1 (pilot)"
-    assert f"resume: collect 0, new attempt 0, terminal {TRIALS}, archive fragments 0" in out
+    assert (f"resume: collect 0, new attempt 0, settled 0, terminal {TRIALS},"
+            " archive fragments 0") in out
     assert out[-2:] == [f"states: valid {TRIALS}", FOOTER]
     assert result.stderr == ""
     assert _snapshot(study) == before

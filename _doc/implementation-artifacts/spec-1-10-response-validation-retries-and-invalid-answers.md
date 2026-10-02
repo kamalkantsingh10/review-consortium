@@ -2,7 +2,8 @@
 title: 'Story 1.10 — Response validation, retries and invalid answers'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '7b7e28e423ecb0fb290c8bf275ef31c9a796dd30'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -62,20 +63,26 @@ context:
 
 ## Code Map
 
+- **As built by Stories 1.7–1.9 (commit 7b7e28e); build on these:**
+  - `engine/dispatch.py` requires a `Budget`. The per-attempt sequence is begin_attempt (with ledger reservation and running `Spend`) → append_request → mark_sent → prepare → submit+set_handle (shielded) → collect → append_response(request_sha256) → record_actual (overshoot check) → set_state. A retry is a new attempt through that same sequence, so it reserves cost and can pause at the ceiling.
+  - Resume (1.8) collects a `sent` attempt that has a handle. Add the 1.10 rule in `board/trials.load_resumable`: an attempt already recorded `valid = 0` gets a new attempt instead of being re-collected.
+  - Today `ok` → `valid` and anything else → `failed` (1.7). 1.10 replaces this with response-schema validation in core.
+  - Migrations are at 4; add 5 if you need new columns.
+  - Error contract: dispatch unwraps errors to ConsortiumError.
 - `src/consortium/config/models.py` (1.2) -- `InstrumentDef`/`ItemDef` give the Item types and scales; `session.max_retries` defaults to 2.
 - `src/consortium/engine/dispatch.py`, `board/writer.py`, `board/trials.py` (1.7, 1.9) -- Extended here.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/core/validate.py` -- `ParsedAnswer` (frozen: `instrument`, `answers: dict[item_id, int|str]`), `validate_response(raw, instrument)` with stable snake_case reasons, and `invalid_rate(counts)`. -- AD-7.
-- [ ] `src/consortium/board/db.py`, `board/trials.py` -- Append a migration adding nullable `valid`, `invalid_reason` and `answer_json` to `attempts` (1.7). In `board/trials.py` add `chosen_answer(conn, trial_id)` (the highest valid attempt) and `invalid_rates(conn, test) -> {"by_agent": ..., "by_model": ...}`. -- All SQL stays in `board/`.
-- [ ] `src/consortium/board/writer.py` -- Add a `record_validation(trial_id, attempt, valid, reason, answer_json)` op. Give the terminal-state op a guard so it never overwrites a terminal state. -- AD-4.
-- [ ] `src/consortium/engine/dispatch.py` -- After archiving the response: validate, then mark valid, re-queue the Trial for a new attempt, or mark invalid. Re-queued Trials pass through the reservation step. -- FR18.
-- [ ] `src/consortium/raters/fake.py`, `src/consortium/config/models.py` -- Add `invalid_rate` and the deterministic invalid outputs. -- Testable retries.
-- [ ] `docs/INTERFACE.md` -- Document `max_retries`, `fake.invalid_rate`, the `invalid_response` reasons, the "highest valid attempt" rule, and the invalid-rate definition.
-- [ ] `tests/test_validate.py` -- Pure validator cases from the matrix for all three built-in Instruments.
-- [ ] `tests/test_retries.py` -- Engine runs with the FakeRater: recover, exhaust, `max_retries: 0`, two valid, kill mid-retry, and `invalid_rates` on a seeded run with a known expected count.
+- [x] `src/consortium/core/validate.py` -- `ParsedAnswer` (frozen: `instrument`, `answers: dict[item_id, int|str]`), `validate_response(raw, instrument)` with stable snake_case reasons, and `invalid_rate(counts)`. -- AD-7.
+- [x] `src/consortium/board/db.py`, `board/trials.py` -- Append a migration adding nullable `valid`, `invalid_reason` and `answer_json` to `attempts` (1.7). In `board/trials.py` add `chosen_answer(conn, trial_id)` (the highest valid attempt) and `invalid_rates(conn, test) -> {"by_agent": ..., "by_model": ...}`. -- All SQL stays in `board/`.
+- [x] `src/consortium/board/writer.py` -- Add a `record_validation(trial_id, attempt, valid, reason, answer_json)` op. Give the terminal-state op a guard so it never overwrites a terminal state. -- AD-4.
+- [x] `src/consortium/engine/dispatch.py` -- After archiving the response: validate, then mark valid, re-queue the Trial for a new attempt, or mark invalid. Re-queued Trials pass through the reservation step. -- FR18.
+- [x] `src/consortium/raters/fake.py`, `src/consortium/config/models.py` -- Add `invalid_rate` and the deterministic invalid outputs. -- Testable retries.
+- [x] `docs/INTERFACE.md` -- Document `max_retries`, `fake.invalid_rate`, the `invalid_response` reasons, the "highest valid attempt" rule, and the invalid-rate definition.
+- [x] `tests/test_validate.py` -- Pure validator cases from the matrix for all three built-in Instruments.
+- [x] `tests/test_retries.py` -- Engine runs with the FakeRater: recover, exhaust, `max_retries: 0`, two valid, kill mid-retry, and `invalid_rates` on a seeded run with a known expected count.
 
 **Acceptance Criteria:**
 - Given any completed Run, when the Archive is compared with `board.db`, then every attempt row has a matching request and response keyed by `(trial_id, attempt)`, and the seeds differ across attempts of one Trial.
@@ -86,6 +93,23 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH | Fake invalid draw shares a random stream with fake_answer, so valid answers are skewed | medium | patch (separate seed) |
+| 2 | BH, EC, VG | Abandoned last attempt counted as an invalid answer; a crash changes results | medium | patch: settle as `failed`/attempts_exhausted, excluded from the invalid rate (architect decision), documented |
+| 3 | BH | A recorded-valid attempt killed before set_state is re-collected | medium | patch (settle from the board) |
+| 4 | BH, EC | Fenced free text containing ``` rejected | medium | patch |
+| 5 | EC | Duplicate-key check runs before the not_json/not_object checks | low | patch |
+| 6 | BH | bad_choice has no item; pairwise wrong type misreported | low | patch |
+| 7 | BH, EC | Likert without points or an unknown item type blamed on the Model | low | patch (programming error) |
+| 8 | BH | max_retries default and a bare ValueError in dispatch; docstring step numbers stale | low | patch |
+| 9 | BH, EC, VG | invalid_rate schema emits non-standard ge/le | low | patch |
+| 10 | BH | Docs overpromise status/export; misleading several-valid statement; check-order wording | low | patch (docs) |
+| 11 | EC | Resume summary counts settled Trials as new attempts | low | patch |
+| 12 | VG | Untested: resume with a max_retries override, abandoned last attempt, invalid_rate bounds, non-ok category, late-collect retry | medium | patch (tests) |
+| 13 | EC | Fake with zero items gives an IndexError | false | The Instrument schema requires ≥1 Item, and render always carries them |
+| 14 | EC | Pairwise with empty options | false | The schema requires exactly two distinct options |
 
 ## Design Notes
 

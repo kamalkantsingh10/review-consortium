@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
@@ -57,6 +58,7 @@ from consortium.board.trials import (
     insert_plan,
     load_resumable,
     load_trials,
+    settle,
     state_counts,
     trial_from_row,
 )
@@ -97,7 +99,7 @@ class OpenSummary:
     by_type: dict[str, int]  # single / pairwise
     requests_sha256: str  # over the concatenated canonical JSON of every request, plan order
     states: dict[str, int] | None = None  # Trials by state after a Run; None for a dry run
-    resumed: dict[str, int] | None = None  # --resume: collect / new attempt / terminal counts
+    resumed: dict[str, int] | None = None  # --resume: collect / new attempt / settled / terminal
     estimate: PlanEstimate | None = None  # cost of the Trials this open sends (all for dry run)
     ceiling: Decimal | None = None  # the ceiling this open runs under; None = uncapped
     committed_before: Decimal | None = None  # Study-wide committed spend before this open
@@ -384,24 +386,37 @@ class _Resumable:
         return {
             r["trial_id"]: (r["attempt"], r["handle"])
             for r in self.todo
-            if r["state"] == "sent" and r["handle"] is not None
+            if r["state"] == "sent" and r["handle"] is not None and r["settle"] is None
         }
+
+    @property
+    def settles(self) -> list[tuple[str, int, str]]:
+        """``(trial_id, attempt, state)`` of Trials settled from the board, no dispatch (1.10)."""
+        return [(r["trial_id"], r["attempt"], r["settle"]) for r in self.todo if r["settle"]]
+
+    @property
+    def dispatched(self) -> list[dict]:
+        """The non-terminal rows that go through the engine (not settled)."""
+        return [r for r in self.todo if r["settle"] is None]
 
     def counts(self) -> dict[str, int]:
         collect = len(self.collect)
+        settled = len(self.settles)
         return {
             "collect": collect,
-            "new attempt": len(self.todo) - collect,
+            "new attempt": len(self.todo) - collect - settled,
+            "settled": settled,
             "terminal": self.terminal,
         }
 
     def key(self) -> list[tuple]:
-        return [(r["trial_id"], r["state"], r["attempt"], r["handle"]) for r in self.todo]
+        return [(r["trial_id"], r["state"], r["attempt"], r["handle"], r["settle"])
+                for r in self.todo]
 
 
 def _load_resumable(study: Path, test: str, ctx: _Context) -> _Resumable:
     def read(conn):
-        return load_trials(conn, test), load_resumable(conn, test)
+        return load_trials(conn, test), load_resumable(conn, test, 1 + ctx.max_retries)
 
     rows, todo = read_only(study, read) or ([], [])
     if not rows:
@@ -602,9 +617,9 @@ def _resume(
         if announce is not None:
             announce([line for line in summary.lines() if line not in shown])
         pairs = [
-            (trial_from_row(r), res_now.requests[r["trial_id"]]) for r in res_now.todo
+            (trial_from_row(r), res_now.requests[r["trial_id"]]) for r in res_now.dispatched
         ]
-        if not pairs:  # nothing to send: write nothing
+        if not pairs and not res_now.settles:  # nothing to send or settle: write nothing
             states, committed_after = read_only(
                 study, lambda conn: (state_counts(conn, test), committed_usd(conn))
             ) or ({}, committed)
@@ -613,14 +628,15 @@ def _resume(
             budget = ctx_now.budget(test, ceiling)
             states, committed_after, paused = asyncio.run(
                 _dispatch_resume(study, ctx_now.cfg, test, pairs, res_now.collect, raters_now,
-                                 writer_spy, budget, new_ceiling)
+                                 writer_spy, budget, new_ceiling, ctx_now.max_retries,
+                                 res_now.settles)
             )
     return dataclasses.replace(summary, states=states, committed=committed_after, paused=paused)
 
 
 def _resume_estimate(ctx: _Context, res: _Resumable) -> PlanEstimate:
     """The estimate over the non-terminal Trials only."""
-    todo = [trial_from_row(r) for r in res.todo]
+    todo = [trial_from_row(r) for r in res.dispatched]
     return ctx.estimate(todo, (res.requests[t.trial_id] for t in todo))
 
 
@@ -634,16 +650,27 @@ async def _dispatch_resume(
     writer_spy: Spy | None,
     budget: Budget,
     new_ceiling: Decimal | None,
+    max_retries: int,
+    settles: list[tuple[str, int, str]],
 ) -> tuple[dict[str, int], Decimal, str | None]:
     async with start_writer(study, spy=writer_spy) as writer:
         if new_ceiling is not None:
             await writer.do(
                 "set_ceiling", lambda conn: set_ceiling(conn, new_ceiling, test, "resume")
             )
-        paused = await dispatch(
-            study, pairs, raters, writer=writer, seed=cfg.seed,
-            concurrency=cfg.concurrency, collect=collect, budget=budget,
-        )
+        for tid, attempt, state in settles:  # story 1.10: settled from the board, no dispatch
+            await writer.do(
+                "settle",
+                functools.partial(settle, trial_id=tid, attempt=attempt, state=state),
+                tid, attempt,
+            )
+        paused = None
+        if pairs:
+            paused = await dispatch(
+                study, pairs, raters, writer=writer, seed=cfg.seed,
+                concurrency=cfg.concurrency, collect=collect, budget=budget,
+                max_retries=max_retries,
+            )
         if paused is None:  # the pause is cleared only once the resume did not pause again
             await writer.do("set_paused", lambda conn: set_paused(conn, test, None))
         states, committed = await writer.do(
@@ -664,7 +691,8 @@ def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
                 f"model {model_id}: provider {model.provider!r} has no adapter yet (Epic 2)",
             )
         fake = model.fake_settings
-        out[model_id] = FakeRater(input_tokens=fake.input_tokens, output_tokens=fake.output_tokens)
+        out[model_id] = FakeRater(input_tokens=fake.input_tokens, output_tokens=fake.output_tokens,
+                                  invalid_rate=fake.invalid_rate)
     return out
 
 
@@ -768,7 +796,7 @@ def _run(
             announce([line for line in summary.lines() if line not in shown])
         states, committed_after, paused = asyncio.run(
             _dispatch_all(study, cfg, plan, pairs, raters_now, writer_spy,
-                          ctx_now.budget(test, ceiling), new_ceiling)
+                          ctx_now.budget(test, ceiling), new_ceiling, ctx_now.max_retries)
         )
     return dataclasses.replace(summary, states=states, committed=committed_after, paused=paused)
 
@@ -782,6 +810,7 @@ async def _dispatch_all(
     writer_spy: Spy | None,
     budget: Budget,
     new_ceiling: Decimal | None,
+    max_retries: int,
 ) -> tuple[dict[str, int], Decimal, str | None]:
     async with start_writer(study, spy=writer_spy) as writer:
         await writer.do("insert_plan", lambda conn: insert_plan(conn, plan.test, plan.trials))
@@ -791,7 +820,7 @@ async def _dispatch_all(
             )
         paused = await dispatch(
             study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency,
-            budget=budget,
+            budget=budget, max_retries=max_retries,
         )
         states, committed = await writer.do(
             "state_counts", lambda conn: (state_counts(conn, plan.test), committed_usd(conn))

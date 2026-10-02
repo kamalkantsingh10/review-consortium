@@ -95,10 +95,16 @@ class MediaLimits(_Strict):
 
 
 class FakeSettings(_Strict):
-    """What the Fake rater reports as usage for each answer (story 1.9)."""
+    """What the Fake rater reports as usage for each answer (story 1.9) and how often
+    it answers invalidly (story 1.10)."""
 
     input_tokens: Annotated[StrictInt, Field(ge=0)] = 0
     output_tokens: Annotated[StrictInt, Field(ge=0)] = 0
+    invalid_rate: Annotated[float, Field(ge=0, le=1, strict=True)] = Field(
+        default=0.0,
+        description="Probability (0-1) that an attempt's answer is invalid; decided per "
+        "attempt seed, so deterministic.",
+    )
 
 
 class ModelConfig(_Strict):

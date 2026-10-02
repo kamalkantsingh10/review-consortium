@@ -23,6 +23,7 @@ models:
     fake:                   # provider: fake only; usage it reports per answer
       input_tokens: 0
       output_tokens: 0
+      invalid_rate: 0       # 0-1: share of attempts answered invalidly (seeded per attempt)
 
 # Canonical media profile every Clip is re-encoded to at ingest.
 media:

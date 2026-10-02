@@ -4,6 +4,13 @@ Inside a dispatching command, one asyncio task owns the ``board.db`` connection
 and performs every write, and every Archive append, in queue order. Other tasks
 submit operations with ``Writer.do`` and await their results; ordering comes
 from the queue, not from locks.
+
+Operation names (the spy sees them) include, per attempt: ``begin_attempt``,
+``append_request``, ``mark_sent``, ``set_handle``, ``append_response``,
+``record_actual``, ``record_validation`` (story 1.10: the attempt's ``valid``,
+``invalid_reason`` and answer, ``board.trials.record_validation``) and
+``set_state`` (the terminal state; ``board.trials.set_state`` refuses to
+overwrite a terminal state).
 """
 
 from __future__ import annotations

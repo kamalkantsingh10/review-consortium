@@ -18,6 +18,7 @@ from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Trial
 from consortium.core.render import canonical_json
 from consortium.core.seeds import derive_seed
+from consortium.core.validate import invalid_rate
 
 TRIAL_STATES = ("planned", "sent", "valid", "invalid", "refused", "failed")
 TERMINAL_STATES = ("valid", "invalid", "refused", "failed")
@@ -85,27 +86,67 @@ def trial_from_row(row: dict) -> Trial:
     return Trial(**{name: row[name] for name in _TRIAL_COLUMNS})
 
 
-def load_resumable(conn: sqlite3.Connection, test: str) -> list[dict]:
+def _latest(conn: sqlite3.Connection, trial_id: str, attempt: int) -> tuple | None:
+    """``(handle, sent_at, valid)`` of the Trial's attempt ``attempt``; None if not recorded."""
+    return conn.execute(
+        "SELECT handle, sent_at, valid FROM attempts WHERE trial_id = ? AND attempt = ?",
+        (trial_id, attempt),
+    ).fetchone()
+
+
+def settlement(
+    state: str, attempt: int, latest: tuple | None, max_attempts: int | None
+) -> str | None:
+    """The state a non-terminal Trial is settled to without dispatch (story 1.10), or None.
+
+    - latest attempt recorded valid (stopped before its state write): ``valid``;
+    - ``attempt >= max_attempts`` and the latest attempt recorded invalid: ``invalid``;
+    - ``attempt >= max_attempts`` and the latest attempt never answered (abandoned,
+      not collectable): ``failed`` (category ``attempts_exhausted``), so it is not
+      counted as an invalid answer.
+    A ``sent`` latest attempt with a handle and no validation is collected instead.
+    """
+    if attempt == 0 or latest is None:
+        return None
+    handle, sent_at, valid = latest
+    if valid == 1:
+        return "valid"
+    if max_attempts is None or attempt < max_attempts:
+        return None
+    if valid == 0:
+        return "invalid"
+    if state == "sent" and sent_at is not None and handle is not None:
+        return None  # collectable: it may still be answered
+    return "failed"
+
+
+def load_resumable(
+    conn: sqlite3.Connection, test: str, max_attempts: int | None = None
+) -> list[dict]:
     """Every non-terminal Trial of ``test`` in plan order, for resume (story 1.8).
 
-    Each row is a ``load_trials`` row plus ``handle``: the stored handle (JSON
-    text) of the Trial's latest attempt (``attempt``) if that attempt was marked
-    ``sent`` and has one, else ``None``. A ``planned`` Trial's attempt, never
-    marked ``sent``, is never collected, so its handle is always ``None``.
+    Each row is a ``load_trials`` row plus ``handle`` and ``settle``. ``handle``
+    is the stored handle (JSON text) of the Trial's latest attempt (``attempt``)
+    if that attempt was marked ``sent``, has one and is not yet validated, else
+    ``None``. A ``planned`` Trial's attempt, never marked ``sent``, is never
+    collected, so its handle is always ``None``. A latest attempt already
+    recorded invalid (``valid = 0``, story 1.10) is not collected again: it gets
+    a new attempt. ``settle`` (story 1.10, see ``settlement``) is the state the
+    Trial is settled to from the board without any dispatch, else ``None``;
+    ``max_attempts`` is ``1 + max_retries`` (``None``: no attempt cap).
     """
     out = []
     for row in load_trials(conn, test):
         if row["state"] in TERMINAL_STATES:
             continue
+        latest = _latest(conn, row["trial_id"], row["attempt"]) if row["attempt"] else None
+        settle = settlement(row["state"], row["attempt"], latest, max_attempts)
         handle = None
-        if row["state"] == "sent":
-            found = conn.execute(
-                "SELECT handle FROM attempts WHERE trial_id = ? AND attempt = ?"
-                " AND sent_at IS NOT NULL",
-                (row["trial_id"], row["attempt"]),
-            ).fetchone()
-            handle = found[0] if found else None
-        out.append({**row, "handle": handle})
+        if settle is None and row["state"] == "sent" and latest is not None:
+            stored, sent_at, valid = latest
+            if sent_at is not None and valid is None:
+                handle = stored
+        out.append({**row, "handle": handle, "settle": settle})
     return out
 
 
@@ -223,3 +264,122 @@ def state_counts(conn: sqlite3.Connection, test: str) -> dict[str, int]:
         conn.execute("SELECT state, count(*) FROM trials WHERE test = ? GROUP BY state", (test,))
     )
     return {s: found[s] for s in TRIAL_STATES if s in found}
+
+
+def record_validation(
+    conn: sqlite3.Connection,
+    trial_id: str,
+    attempt: int,
+    valid: bool,
+    reason: str | None,
+    answer_json: str | None,
+    category: str = "ok",
+) -> None:
+    """Record the validation of one attempt (story 1.10) with its ``category`` and ``answered_at``.
+
+    ``reason`` is the ``invalid_response`` reason of an invalid attempt;
+    ``answer_json`` the canonical JSON of a valid attempt's parsed answer.
+    The Trial's state is not changed (see ``set_state``).
+    """
+    if valid and (answer_json is None or reason is not None):
+        raise ValueError("a valid attempt has an answer and no invalid reason")
+    if not valid and (reason is None or answer_json is not None):
+        raise ValueError("an invalid attempt has a reason and no answer")
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE attempts SET valid = ?, invalid_reason = ?, answer_json = ?, category = ?,"
+            " answered_at = ? WHERE trial_id = ? AND attempt = ?",
+            (int(valid), reason, answer_json, category, utc_now_ms(), trial_id, attempt),
+        )
+        if cur.rowcount != 1:
+            raise KeyError((trial_id, attempt))
+
+
+def settle(conn: sqlite3.Connection, trial_id: str, attempt: int, state: str) -> None:
+    """Settle a non-terminal Trial at its latest ``attempt`` to ``state`` (story 1.10).
+
+    ``state`` comes from ``settlement``. ``failed`` records category
+    ``attempts_exhausted`` on the attempt; ``valid``/``invalid`` keep the
+    category recorded with the attempt's validation. Never changes a terminal state.
+    """
+    if state not in ("valid", "invalid", "failed"):
+        raise ValueError(f"cannot settle a Trial to {state!r}")
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE trials SET state = ? WHERE trial_id = ? AND attempt = ?"
+            f" AND state NOT IN ({', '.join('?' * len(TERMINAL_STATES))})",
+            (state, trial_id, attempt, *TERMINAL_STATES),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"Trial {trial_id} attempt {attempt} cannot be settled {state}")
+        category = "attempts_exhausted" if state == "failed" else None
+        conn.execute(
+            "UPDATE attempts SET category = coalesce(?, category),"
+            " answered_at = coalesce(answered_at, ?) WHERE trial_id = ? AND attempt = ?",
+            (category, utc_now_ms(), trial_id, attempt),
+        )
+
+
+def settle_exhausted(conn: sqlite3.Connection, trial_id: str, max_attempts: int) -> bool:
+    """Settle the Trial (see ``settlement``) if it can take no new attempt; True if settled.
+
+    The engine's guard before every new attempt, so a Trial never gets more than
+    ``max_attempts`` (``1 + max_retries``) attempts. A terminal Trial is left
+    unchanged (False).
+    """
+    row = conn.execute(
+        "SELECT state, attempt FROM trials WHERE trial_id = ?", (trial_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(trial_id)
+    state, attempt = row
+    if state in TERMINAL_STATES or attempt < max_attempts:
+        return False
+    target = settlement(state, attempt, _latest(conn, trial_id, attempt), max_attempts)
+    if target is None:  # a collectable attempt: never dispatched past the cap
+        target = "failed"
+    settle(conn, trial_id, attempt, target)
+    return True
+
+
+def chosen_answer(conn: sqlite3.Connection, trial_id: str) -> dict | None:
+    """The Trial's answer: its highest valid attempt, as ``{"attempt", "answers"}``.
+
+    ``answers`` is the parsed ``{item_id: value}``; ``None`` when no attempt is valid.
+    """
+    row = conn.execute(
+        "SELECT attempt, answer_json FROM attempts WHERE trial_id = ? AND valid = 1"
+        " ORDER BY attempt DESC LIMIT 1",
+        (trial_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"attempt": row[0], "answers": json.loads(row[1])}
+
+
+_RATE_STATES = ("valid", "invalid", "refused", "failed")
+
+
+def invalid_rates(conn: sqlite3.Connection, test: str) -> dict[str, dict[str, dict]]:
+    """The invalid-answer rate of ``test`` per Agent and per Model (story 1.10).
+
+    Returns ``{"by_agent": {agent_id: entry}, "by_model": {model_id: entry}}``,
+    each entry ``{"valid", "invalid", "refused", "failed", "rate"}`` (Trial
+    counts; ``rate`` from ``core.validate.invalid_rate``, ``None`` when no Trial
+    is valid or invalid). Keys are sorted.
+    """
+    out: dict[str, dict[str, dict]] = {}
+    for key, column in (("by_agent", "agent_id"), ("by_model", "model_id")):
+        counts: dict[str, dict[str, int]] = {}
+        for group, state, n in conn.execute(
+            f"SELECT {column}, state, count(*) FROM trials WHERE test = ?"
+            f" GROUP BY {column}, state",
+            (test,),
+        ):
+            counts.setdefault(group, {s: 0 for s in _RATE_STATES})
+            if state in _RATE_STATES:
+                counts[group][state] = n
+        out[key] = {
+            group: {**c, "rate": invalid_rate(c)} for group, c in sorted(counts.items())
+        }
+    return out

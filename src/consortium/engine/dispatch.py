@@ -15,7 +15,22 @@ through the single writer (``board.writer``):
 6. ``record_actual``: the attempt's actual cost from the returned usage (with no
    usage the reservation stands; an attempt with no ledger row, from before the
    ledger existed, gets one);
-7. ``set_state``: ``ok`` -> ``valid``, any other category -> ``failed``.
+7. ``record_validation`` (story 1.10): an ``ok`` response is parsed and validated
+   by ``core.validate.validate_response`` against the Trial's Instrument (the Items
+   of its request); the attempt's ``valid``, ``invalid_reason`` and canonical
+   answer JSON are recorded;
+8. ``set_state``: a valid attempt -> ``valid``; an invalid one -> ``invalid`` once
+   ``attempt > max_retries`` (no retries left), else the Trial stays ``sent`` and
+   gets a new attempt through steps 1-8 (a new seed, the same request text, its
+   own reservation; a refused reservation leaves it ``sent`` for resume). Any
+   category other than ``ok`` -> ``failed`` (never retried, never validated).
+
+Retries are sequential per Trial: attempt n+1 starts only after attempt n was
+collected and found invalid. A Trial never gets more than ``1 + max_retries``
+attempts: when it already has that many and would need another (on resume),
+it is settled instead (``board.trials.settle_exhausted``): ``invalid`` if its
+last attempt was recorded invalid, ``failed`` (category ``attempts_exhausted``)
+if that attempt was abandoned unanswered, ``valid`` if it was recorded valid.
 
 **Ceiling pause** (story 1.9): once a reservation is refused, or a recorded
 actual cost pushes committed spend over the ceiling (the estimate was too low),
@@ -38,11 +53,15 @@ without ``sent_at``, possibly with an archived request) or ``sent``.
 
 **Resume** (story 1.8): ``collect`` maps the ``trial_id`` of every ``sent`` Trial
 whose latest attempt has a stored handle to ``(attempt, handle)``. Such a Trial
-is collected at that same attempt (steps 5-6 only: no new attempt, no new
-request line). Every other Trial passed in (``planned``, with any ``attempt``,
-or ``sent`` without a handle) gets a new attempt through steps 1-6; attempt
+is collected at that same attempt (steps 5-8 only: no new attempt, no new
+request line; an invalid answer then continues into retries). Every other
+Trial passed in (``planned``, with any ``attempt``, or ``sent`` without a
+handle) gets a new attempt through steps 1-8; attempt
 numbers are never reused, and an attempt never marked ``sent`` is never
-collected. Terminal Trials must not be passed in.
+collected. A latest attempt already recorded invalid is not in ``collect``
+(``board.trials.load_resumable``), so it gets a new attempt; one already
+recorded valid is settled by the caller from the board and not passed in.
+Terminal Trials must not be passed in.
 """
 
 from __future__ import annotations
@@ -65,7 +84,8 @@ from consortium.board.writer import Writer
 from consortium.core import cost
 from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Trial
-from consortium.core.render import ClipRef, TrialRequest, canonical_json
+from consortium.core.render import ClipRef, RequestItem, TrialRequest, canonical_json
+from consortium.core.validate import INVALID_RESPONSE, validate_response
 from consortium.raters.base import Handle, MediaRef, Rater, RaterCall, RaterResult
 
 
@@ -102,9 +122,37 @@ class Budget:
         return cost.actual(usage, self.models[model_id], self.prices)
 
 
-def state_for(result: RaterResult) -> str:
-    """Terminal state of an attempt (story 1.7; validation replaces this in 1.10)."""
-    return "valid" if result.category == "ok" else "failed"
+@dataclass(frozen=True)
+class _InstrumentView:
+    """The Instrument as its request carries it: its name and its Items."""
+
+    name: str
+    items: tuple[RequestItem, ...]
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What one collected attempt means: its validation and the Trial's next step."""
+
+    valid: bool | None  # None: not validated (category not ok)
+    reason: str | None
+    answer_json: str | None
+    state: str | None  # the terminal state to set, None: stays sent and is retried
+
+
+def outcome_for(
+    trial: Trial, request: TrialRequest, result: RaterResult, attempt: int, max_retries: int
+) -> Outcome:
+    """Validate ``result`` (core) and decide: ``valid``, retry, ``invalid`` or ``failed``."""
+    if result.category != "ok":
+        return Outcome(None, None, None, "failed")
+    try:
+        parsed = validate_response(result.raw, _InstrumentView(trial.instrument, request.items))
+    except ConsortiumError as err:
+        if err.code != INVALID_RESPONSE:
+            raise
+        return Outcome(False, err.message, None, None if attempt <= max_retries else "invalid")
+    return Outcome(True, None, canonical_json(parsed.answers).decode("utf-8"), "valid")
 
 
 def _clips_of(request: TrialRequest) -> list[ClipRef]:
@@ -174,6 +222,7 @@ async def dispatch(
     concurrency: int,
     collect: Mapping[str, tuple[int, str]] | None = None,
     budget: Budget,
+    max_retries: int,
 ) -> str | None:
     """Send every ``(Trial, TrialRequest)`` through its Model's Rater.
 
@@ -183,17 +232,24 @@ async def dispatch(
     text)`` of a ``sent`` attempt to collect instead of re-sending; its response
     line carries the SHA-256 of ``request``, which the caller has checked equals
     the archived one. ``budget`` prices and caps every attempt
-    (``Budget.zero`` for an uncapped zero-cost Run). Returns ``"ceiling"`` when the Run
+    (``Budget.zero`` for an uncapped zero-cost Run). ``max_retries`` is the Test's
+    effective ``session.max_retries``: an invalid answer is retried while
+    ``attempt <= max_retries``. Returns ``"ceiling"`` when the Run
     paused at the ceiling, else ``None``. Any error stops the Run (see the module docstring):
     ``bad_concurrency`` for ``concurrency < 1``, ``provider_unavailable`` for a
-    Model with no Rater, ``adapter_error``, ``run_failed`` or the adapter's own
-    ``ConsortiumError``.
+    Model with no Rater, ``bad_max_retries`` for ``max_retries < 0``,
+    ``adapter_error``, ``run_failed`` or the adapter's own ``ConsortiumError``.
     """
     study = Path(study_dir)
     if concurrency < 1:
         raise ConsortiumError(
             "bad_concurrency", f"concurrency must be at least 1, not {concurrency}"
         )
+    if max_retries < 0:
+        raise ConsortiumError(
+            "bad_max_retries", f"max_retries must be at least 0, not {max_retries}"
+        )
+    max_attempts = 1 + max_retries
     missing = sorted({t.model_id for t, _ in trials} - set(rater_by_model))
     if missing:
         raise ConsortiumError(
@@ -214,16 +270,24 @@ async def dispatch(
             task.exception()  # retrieved: the awaiting task reports it, or it was cancelled
 
     async def run_one(trial: Trial, request: TrialRequest) -> None:
+        """New attempts for ``trial`` until it is settled, paused or out of retries."""
+        while await attempt_once(trial, request):
+            pass
+
+    async def attempt_once(trial: Trial, request: TrialRequest) -> bool:
+        """One new attempt; True when its answer was invalid and it is to be retried."""
         rater = rater_by_model[trial.model_id]
         tid = trial.trial_id
         async with semaphores[rater.provider]:
             if paused:
-                return
+                return False
             usd = budget.reservation(trial, request)
 
             def reserve(conn):  # runs on the writer: no attempt starts after a refusal
                 if paused:
                     return None
+                if board_trials.settle_exhausted(conn, tid, max_attempts):
+                    return None  # no attempts left: the Trial is now invalid
                 began = board_trials.begin_attempt(
                     conn, trial_id=tid, study_seed=seed, usd=usd, ceiling=ceiling, spend=spend
                 )
@@ -233,7 +297,7 @@ async def dispatch(
 
             began = await writer.do("begin_attempt", reserve, tid)
             if began is None:
-                return
+                return False
             attempt, attempt_seed = began
             media = tuple([await prepared.get(rater, c) for c in _clips_of(request)])
             request_record = await writer.do(
@@ -268,13 +332,14 @@ async def dispatch(
             shielded.add(inner)
             inner.add_done_callback(_settle)
             handle = await asyncio.shield(inner)
-            await finish(rater, trial, request, attempt, handle,
-                         request_record["request_sha256"])
+            return await finish(rater, trial, request, attempt, handle,
+                                request_record["request_sha256"])
 
     async def finish(
         rater: Rater, trial: Trial, request: TrialRequest, attempt: int, handle: Handle,
         request_sha256: str,
-    ) -> None:
+    ) -> bool:
+        """Collect, archive, price and validate one attempt; True when it is to be retried."""
         tid = trial.trial_id
         result = _one(await rater.collect([handle]), "collect", rater.provider)
         await writer.do(
@@ -298,14 +363,28 @@ async def dispatch(
                 paused.append("ceiling")
 
         await writer.do("record_actual", record, tid, attempt)
+        outcome = outcome_for(trial, request, result, attempt, max_retries)
+        if outcome.valid is not None:
+            await writer.do(
+                "record_validation",
+                functools.partial(
+                    board_trials.record_validation, trial_id=tid, attempt=attempt,
+                    valid=outcome.valid, reason=outcome.reason,
+                    answer_json=outcome.answer_json, category=result.category,
+                ),
+                tid, attempt,
+            )
+        if outcome.state is None:
+            return True  # stays sent: a new attempt follows
         await writer.do(
             "set_state",
             functools.partial(
                 board_trials.set_state, trial_id=tid, attempt=attempt,
-                state=state_for(result), category=result.category,
+                state=outcome.state, category=result.category,
             ),
             tid, attempt,
         )
+        return False
 
     async def collect_one(trial: Trial, request: TrialRequest, attempt: int, handle: str) -> None:
         """Resume a ``sent`` attempt with a handle: collect it, never re-send it."""
@@ -320,7 +399,9 @@ async def dispatch(
                 "adapter_error", f"stored handle unreadable for {trial.trial_id}"
             )
         async with semaphores[rater.provider]:
-            await finish(rater, trial, request, attempt, parsed, request_sha256)
+            retry = await finish(rater, trial, request, attempt, parsed, request_sha256)
+        if retry:
+            await run_one(trial, request)
 
     try:
         async with asyncio.TaskGroup() as group:

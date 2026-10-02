@@ -47,7 +47,7 @@ GODSPEED = {f"animacy_{i}": 3 for i in range(1, 7)} | {f"likeability_{i}": 3 for
 CONDITIONS = {"c_aaaaaaaa": {"gait": "smoothwalk"}, "c_bbbbbbbb": {"gait": "jerkystep"}}
 SOURCE_NAME = "secret_source_take3.mov"
 STEPS = ["begin_attempt", "append_request", "mark_sent", "set_handle", "append_response",
-         "record_actual", "set_state"]
+         "record_actual", "record_validation", "set_state"]
 FOOTER = "cost: committed 0 USD, ceiling none"
 TRIALS = 64 * (2 + 2)  # 64 Personas x 1 Model x 1 Repeat x (2 godspeed + 2 pairwise)
 
@@ -298,8 +298,8 @@ def test_main_refused(study: Path) -> None:
 def test_other_provider_unavailable(study: Path) -> None:
     cfg = study / "study.yaml"
     text = cfg.read_text()
-    fake = "      input_tokens: 0\n      output_tokens: 0\n"
-    text = text.replace(text[text.index("    fake:"):text.index(fake) + len(fake)], "")
+    end = text.index("\n", text.index("      invalid_rate:")) + 1
+    text = text.replace(text[text.index("    fake:"):end], "")
     cfg.write_text(text.replace("provider: fake ", "provider: gemini ", 1))
     result = _cli("pilot1", "--yes", "--ceiling", "5", "--study", str(study))
     assert result.exit_code == 1
@@ -465,7 +465,7 @@ def test_every_request_line_precedes_its_sent_write(study: Path) -> None:
             await writer.do("insert_plan",
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, {"m1": FakeRater()}, writer=writer, seed=1,
-                           concurrency=4, budget=Budget.zero("pilot1"))
+                           concurrency=4, budget=Budget.zero("pilot1"), max_retries=2)
 
     asyncio.run(run())
     assert seen.count("mark_sent") == seen.count("set_state") == 20
@@ -513,7 +513,7 @@ def _run_engine(study: Path, rater: _CountingRater, concurrency: int) -> None:
             await writer.do("insert_plan",
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, {"m1": rater}, writer=writer, seed=1,
-                           concurrency=concurrency, budget=Budget.zero("pilot1"))
+                           concurrency=concurrency, budget=Budget.zero("pilot1"), max_retries=2)
 
     asyncio.run(run())
 
@@ -553,7 +553,7 @@ def _engine(study: Path, rater, concurrency: int = 4, models: dict | None = None
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, models if models is not None else {"m1": rater},
                            writer=writer, seed=1, concurrency=concurrency,
-                           budget=Budget.zero("pilot1"))
+                           budget=Budget.zero("pilot1"), max_retries=2)
 
     asyncio.run(run())
 
