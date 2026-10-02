@@ -5,7 +5,9 @@ request's Item order: a Likert Item gets ``randint(1, points)``, a pairwise Item
 one of its options (a position), a free-text Item a fixed string. The answer is
 the canonical JSON of ``{item_id: value}``, which matches the Instrument's
 response schema. The handle carries the answer itself, so ``collect`` works
-after a restart. No network.
+after a restart. Usage is fixed per Model: ``input_tokens`` and
+``output_tokens`` from its ``fake`` settings in ``study.yaml`` (default 0), so
+the ledger and the ceiling can be exercised offline. No network.
 """
 
 from __future__ import annotations
@@ -36,6 +38,10 @@ def fake_answer(request: TrialRequest, seed: int) -> str:
 class FakeRater:
     provider = "fake"
 
+    def __init__(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
     async def prepare(self, clip: ClipRef) -> MediaRef:
         return MediaRef(clip.clip_id, clip.sha256, f"fake:{clip.clip_id}")
 
@@ -50,7 +56,7 @@ class FakeRater:
         return [
             RaterResult(
                 raw=h["raw"],
-                usage={"input_tokens": 0, "output_tokens": 0},
+                usage={"input_tokens": self.input_tokens, "output_tokens": self.output_tokens},
                 model_build=FAKE_BUILD,
                 category="ok",
             )

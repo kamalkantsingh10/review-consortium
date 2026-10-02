@@ -20,6 +20,16 @@ migrates it first, under the lease.
 re-renders every stored Trial from its row plus the Study folder, checks that
 every archived request re-renders byte-identically, and sends only the
 non-terminal Trials through the same ``engine.dispatch``.
+
+Cost (story 1.9): every open prints the ``core.cost`` estimate of the Trials it
+would send (``expected`` once each, ``worst_case`` with every retry) before
+anything reaches a Rater. A Run or resume needs a ceiling (``--ceiling``, or
+the latest one logged in ``board.db``) unless every Model it sends to is Fake;
+a fresh Run refuses ``over_ceiling`` when committed spend plus ``expected``
+exceeds it. ``--ceiling`` is logged (``set_ceiling``) only once the Run is
+confirmed, under the lease. The engine reserves per attempt and pauses the Run
+at the ceiling (``OpenSummary.paused == "ceiling"``); ``--resume`` clears the
+pause and continues.
 """
 
 from __future__ import annotations
@@ -37,7 +47,8 @@ from consortium.archive.jsonl import REQUESTS_FILE, RESPONSES_FILE, read_lines
 from consortium.board.clips import list_clips
 from consortium.board.db import read_only
 from consortium.board.lease import acquire_lease
-from consortium.board.tests import get_test
+from consortium.board.ledger import committed_usd, current_ceiling, set_ceiling
+from consortium.board.tests import get_test, paused_reason, set_paused
 from consortium.board.trials import (
     MODEL_PURPOSE,
     TERMINAL_STATES,
@@ -50,15 +61,22 @@ from consortium.board.trials import (
     trial_from_row,
 )
 from consortium.board.writer import Spy, migrate, start_writer
-from consortium.config.load import PERSONAS_DIR, load_instruments, load_personas, load_study
+from consortium.config.load import (
+    PERSONAS_DIR,
+    load_instruments,
+    load_personas,
+    load_prices,
+    load_study,
+)
 from consortium.config.load import load_test as load_test_file
-from consortium.config.models import InstrumentDef, StudyConfig, TestConfig
+from consortium.config.models import InstrumentDef, PricesConfig, StudyConfig, TestConfig
+from consortium.core.cost import PlanEstimate, estimate_plan, usd
 from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Plan, Trial, plan_test
 from consortium.core.render import TrialRequest, canonical_json, practice_for, render
 from consortium.core.seeds import derive_seed
 from consortium.core.test_checks import check_media_limits, check_plan
-from consortium.engine.dispatch import dispatch
+from consortium.engine.dispatch import Budget, dispatch
 from consortium.raters.base import Rater
 from consortium.raters.fake import FakeRater
 
@@ -80,6 +98,12 @@ class OpenSummary:
     requests_sha256: str  # over the concatenated canonical JSON of every request, plan order
     states: dict[str, int] | None = None  # Trials by state after a Run; None for a dry run
     resumed: dict[str, int] | None = None  # --resume: collect / new attempt / terminal counts
+    estimate: PlanEstimate | None = None  # cost of the Trials this open sends (all for dry run)
+    ceiling: Decimal | None = None  # the ceiling this open runs under; None = uncapped
+    committed_before: Decimal | None = None  # Study-wide committed spend before this open
+    committed: Decimal | None = None  # Study-wide committed spend after a Run
+    paused: str | None = None  # "ceiling" when the Run paused (or, dry run, is paused)
+    would_refuse: str | None = None  # dry run: the ceiling refusal a Run would raise
 
     @property
     def not_valid(self) -> int:
@@ -107,9 +131,33 @@ class OpenSummary:
             f"by instrument: {fmt(self.by_instrument)}",
             f"by type: {fmt(self.by_type)}",
             f"requests sha256: {self.requests_sha256}",
+            *self.cost_lines(),
             *([f"resume: {fmt(self.resumed)}"] if self.resumed is not None else []),
             *([f"states: {fmt(self.states)}"] if self.states is not None else []),
+            *(
+                [f"cost: committed {usd(self.committed)} USD, ceiling {_usd(self.ceiling)}"]
+                if self.committed is not None else []
+            ),
+            *([f"paused: {self.paused}"] if self.paused is not None else []),
         ]
+
+    def cost_lines(self) -> list[str]:
+        """The estimate and ceiling lines, printed before any confirmation."""
+        if self.estimate is None:
+            return []
+        lines = self.estimate.lines()
+        if self.committed_before is not None:
+            lines.append(
+                f"ceiling: {_usd(self.ceiling)}, committed before: "
+                f"{usd(self.committed_before)} USD"
+            )
+        if self.would_refuse is not None:
+            lines.append(f"would refuse: {self.would_refuse}")
+        return lines
+
+
+def _usd(value: Decimal | None) -> str:
+    return "none" if value is None else f"{usd(value)} USD"
 
 
 def _summarize(
@@ -160,20 +208,68 @@ def _summarize_trials(
 
 
 def parse_ceiling(ceiling: str | None) -> Decimal | None:
-    """``--ceiling`` as a USD ``Decimal`` > 0; ``bad_ceiling`` otherwise."""
+    """``--ceiling`` as a USD ``Decimal`` > 0; ``invalid_ceiling`` otherwise."""
     if ceiling is None:
         return None
     try:
         value = Decimal(ceiling.strip())
     except InvalidOperation as err:
         raise ConsortiumError(
-            "bad_ceiling", f"--ceiling: {ceiling!r} is not a USD amount such as 5.00"
+            "invalid_ceiling", f"--ceiling: {ceiling!r} is not a USD amount such as 5.00"
         ) from err
     if not value.is_finite() or value <= 0:
         raise ConsortiumError(
-            "bad_ceiling", f"--ceiling: {ceiling!r} must be a USD amount greater than 0"
+            "invalid_ceiling", f"--ceiling: {ceiling!r} must be a USD amount greater than 0"
         )
     return value
+
+
+def _spend(study: Path) -> tuple[Decimal | None, Decimal]:
+    """``(current ceiling, Study-wide committed spend)`` read from ``board.db``."""
+    found = read_only(study, lambda conn: (current_ceiling(conn), committed_usd(conn)))
+    return found if found is not None else (None, Decimal(0))
+
+
+def _resolve_ceiling(study: Path, given: Decimal | None) -> tuple[Decimal | None, Decimal]:
+    """The ceiling this open runs under (``given``, else the logged one) and committed spend."""
+    current, committed = _spend(study)
+    return (given if given is not None else current), committed
+
+
+def _enforce_ceiling(
+    ceiling: Decimal | None,
+    committed: Decimal,
+    given: Decimal | None,
+    uncapped_ok: bool,
+    expected: Decimal,
+    *,
+    fresh: bool,
+) -> None:
+    """Apply the ceiling rules before anything is written.
+
+    ``over_ceiling`` when a ``given`` ceiling is below committed spend.
+    ``ceiling_required`` when no ceiling is given or logged unless
+    ``uncapped_ok`` (every Model is Fake and priced 0). A ``fresh`` Run refuses
+    ``over_ceiling`` when committed spend plus ``expected`` exceeds the ceiling
+    (a resume does not: the engine pauses it before any send it cannot afford).
+    """
+    if given is not None and committed > given:
+        raise ConsortiumError(
+            "over_ceiling",
+            f"committed {usd(committed)} > ceiling {usd(given)}; nothing was sent",
+        )
+    if ceiling is None and not uncapped_ok:
+        raise ConsortiumError(
+            "ceiling_required",
+            "no cost ceiling is set; pass --ceiling <usd> (only Runs whose Models are all "
+            "Fake and priced 0 may run uncapped)",
+        )
+    if fresh and ceiling is not None and committed + expected > ceiling:
+        spent = f"committed {usd(committed)} + " if committed else ""
+        raise ConsortiumError(
+            "over_ceiling",
+            f"{spent}expected {usd(expected)} > ceiling {usd(ceiling)}; nothing was sent",
+        )
 
 
 def _read_card(study: Path, persona_id: str) -> str:
@@ -198,9 +294,13 @@ def open_test(
 ) -> OpenSummary:
     """Plan and render every Trial of the registered Test ``test``; unless ``dry_run``, run it.
 
-    ``ceiling`` is validated (``bad_ceiling``) but not yet used (story 1.9).
-    ``resume`` continues a stopped Run (see ``_resume``); it is ignored for a dry
-    run. Planning raises
+    ``ceiling`` (USD text, > 0, else ``invalid_ceiling``) is the Study's new
+    cost ceiling, logged once a Run or resume is confirmed (never for a dry run).
+    A Run or resume raises ``ceiling_required`` (no ceiling and a non-Fake Model)
+    and a fresh Run ``over_ceiling`` (committed + expected > ceiling), both after
+    the estimate is announced and before confirmation; a Run that pauses at the
+    ceiling returns with ``paused == "ceiling"``. ``resume`` continues a stopped
+    Run (see ``_resume``); it is ignored for a dry run. Planning raises
     ``unknown_test`` (not registered, or no ``board.db``), ``protocol_lock_unavailable``
     (before any planning), ``test_exists`` (the registered file is missing or was
     edited), ``test_changed``, ``board_unreadable``, ``panel_missing`` /
@@ -222,14 +322,31 @@ def open_test(
     request no longer re-renders byte-identically, and confirmation counts only
     the non-terminal Trials.
     """
-    parse_ceiling(ceiling)
+    new_ceiling = parse_ceiling(ceiling)
     study = Path(study_dir)
     if dry_run:
-        _, plan, requests, instrument_order, _, _ = _plan_and_render(study, test)
+        ctx, plan, requests = _plan_and_render(study, test)
         digest = hashlib.sha256()
-        for request in requests:  # rendered lazily, one at a time
-            digest.update(canonical_json(request))
-        return _summarize(plan, instrument_order, dry_run, digest.hexdigest())
+
+        def hashed() -> Iterator[TrialRequest]:
+            for request in requests:  # rendered lazily, one at a time
+                digest.update(canonical_json(request))
+                yield request
+
+        estimate = ctx.estimate(plan.trials, hashed())
+        dry_ceiling, committed = _resolve_ceiling(study, new_ceiling)
+        model_ids = list(dict.fromkeys(s.model_id for s in plan.sessions))
+        would_refuse = None
+        try:
+            _enforce_ceiling(dry_ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
+                             estimate.expected, fresh=True)
+        except ConsortiumError as err:
+            would_refuse = err.code
+        return dataclasses.replace(
+            _summarize(plan, ctx.instrument_order, dry_run, digest.hexdigest()),
+            estimate=estimate, ceiling=dry_ceiling, committed_before=committed,
+            would_refuse=would_refuse, paused=read_only(study, lambda c: paused_reason(c, test)),
+        )
     load = _load_context if resume else _plan_and_render
     try:
         prepared = load(study, test)
@@ -242,11 +359,11 @@ def open_test(
     if resume:
         ctx, _, _ = prepared
         return _resume(
-            study, test, ctx, yes=yes, confirm=confirm, announce=announce,
+            study, test, ctx, new_ceiling, yes=yes, confirm=confirm, announce=announce,
             writer_spy=writer_spy,
         )
     return _run(
-        study, test, prepared, yes=yes, confirm=confirm, announce=announce,
+        study, test, prepared, new_ceiling, yes=yes, confirm=confirm, announce=announce,
         writer_spy=writer_spy,
     )
 
@@ -372,8 +489,8 @@ def check_reissue(study_dir: Path | str, test: str) -> int:
     return _check_reissue(study, ctx, test, _load_resumable(study, test, ctx))[0]
 
 
-def _resume_raters(cfg: StudyConfig, test: str, res: _Resumable) -> dict[str, Rater]:
-    """Raters for the Models of the non-terminal Trials only; ``unknown_model`` if one is gone."""
+def _resume_models(cfg: StudyConfig, test: str, res: _Resumable) -> list[str]:
+    """The Models of the non-terminal Trials only; ``unknown_model`` if one is gone."""
     model_ids = list(dict.fromkeys(r["model_id"] for r in res.todo))
     known = {m.id for m in cfg.models}
     for model_id in model_ids:
@@ -383,13 +500,22 @@ def _resume_raters(cfg: StudyConfig, test: str, res: _Resumable) -> dict[str, Ra
                 f"model {model_id!r} of Test {test!r}'s open Trials is not in study.yaml",
                 path="study.yaml",
             )
-    return raters_for(cfg, model_ids)
+    return model_ids
+
+
+def _providers(cfg: StudyConfig, model_ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(cfg.model_by_id(m).provider for m in model_ids))
+
+
+def _ceiling_prompt(new_ceiling: Decimal | None) -> str:
+    return "" if new_ceiling is None else f", ceiling {usd(new_ceiling)} USD (study-wide)"
 
 
 def _resume(
     study: Path,
     test: str,
     ctx: _Context,
+    new_ceiling: Decimal | None,
     *,
     yes: bool,
     confirm: Confirm | None,
@@ -406,8 +532,19 @@ def _resume(
     collected attempt's response carries the archived ``request_sha256``.
     """
     res = _load_resumable(study, test, ctx)
-    raters = _resume_raters(ctx.cfg, test, res)
-    providers = list(dict.fromkeys(r.provider for r in raters.values()))
+    model_ids = _resume_models(ctx.cfg, test, res)
+    providers = _providers(ctx.cfg, model_ids)
+    estimate = _resume_estimate(ctx, res)
+    ceiling, committed = _resolve_ceiling(study, new_ceiling)
+    shown = dataclasses.replace(
+        _summarize_trials(test, ctx.kind, res.trials, ctx.instrument_order, False, res.digest),
+        estimate=estimate, ceiling=ceiling, committed_before=committed,
+    ).lines()
+    if announce is not None:
+        announce(shown)
+    _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
+                     estimate.expected, fresh=False)
+    raters_for(ctx.cfg, model_ids)  # provider_unavailable before confirmation
     if res.todo and not yes:
         if confirm is None:
             raise ConsortiumError(
@@ -415,7 +552,8 @@ def _resume(
             )
         prompt = (
             f"requests sha256: {res.digest}\n"
-            f"Resume {len(res.todo)} Trials on {', '.join(providers)}?"
+            f"Resume {len(res.todo)} Trials on {', '.join(providers)}"
+            f"{_ceiling_prompt(new_ceiling)}?"
         )
         if not confirm(prompt):
             raise ConsortiumError("not_confirmed", "Resume not confirmed; nothing was sent")
@@ -434,32 +572,56 @@ def _resume(
         if ctx_now.test_sha256 != ctx.test_sha256:
             raise changed
         res_now = _load_resumable(study, test, ctx_now)
-        raters_now = _resume_raters(ctx_now.cfg, test, res_now)
+        models_now = _resume_models(ctx_now.cfg, test, res_now)
+        raters_now = raters_for(ctx_now.cfg, models_now)
         if (
             res_now.digest != res.digest
             or res_now.key() != res.key()
-            or [r.provider for r in raters_now.values()] != [r.provider for r in raters.values()]
+            or _providers(ctx_now.cfg, models_now) != providers
         ):
             raise changed
         _, fragments = _check_reissue(study, ctx_now, test, res_now)
         fragments += read_lines(study, RESPONSES_FILE)[1]
+        estimate_now = _resume_estimate(ctx_now, res_now)
+        if estimate_now != estimate:
+            raise changed
+        before = (ceiling, committed)
+        ceiling, committed = _resolve_ceiling(study, new_ceiling)
+        _enforce_ceiling(ceiling, committed, new_ceiling, ctx_now.uncapped_ok(models_now),
+                         estimate.expected, fresh=False)
+        if (ceiling, committed) != before:
+            raise changed
         summary = dataclasses.replace(
             _summarize_trials(
                 test, ctx_now.kind, res_now.trials, ctx_now.instrument_order, False,
                 res_now.digest,
             ),
             resumed={**res_now.counts(), "archive fragments": fragments},
+            estimate=estimate, ceiling=ceiling, committed_before=committed,
         )
         if announce is not None:
-            announce(summary.lines())
+            announce([line for line in summary.lines() if line not in shown])
         pairs = [
             (trial_from_row(r), res_now.requests[r["trial_id"]]) for r in res_now.todo
         ]
-        states = asyncio.run(
-            _dispatch_resume(study, ctx_now.cfg, test, pairs, res_now.collect, raters_now,
-                             writer_spy)
-        )
-    return dataclasses.replace(summary, states=states)
+        if not pairs:  # nothing to send: write nothing
+            states, committed_after = read_only(
+                study, lambda conn: (state_counts(conn, test), committed_usd(conn))
+            ) or ({}, committed)
+            paused = read_only(study, lambda conn: paused_reason(conn, test))
+        else:
+            budget = ctx_now.budget(test, ceiling)
+            states, committed_after, paused = asyncio.run(
+                _dispatch_resume(study, ctx_now.cfg, test, pairs, res_now.collect, raters_now,
+                                 writer_spy, budget, new_ceiling)
+            )
+    return dataclasses.replace(summary, states=states, committed=committed_after, paused=paused)
+
+
+def _resume_estimate(ctx: _Context, res: _Resumable) -> PlanEstimate:
+    """The estimate over the non-terminal Trials only."""
+    todo = [trial_from_row(r) for r in res.todo]
+    return ctx.estimate(todo, (res.requests[t.trial_id] for t in todo))
 
 
 async def _dispatch_resume(
@@ -470,30 +632,39 @@ async def _dispatch_resume(
     collect: dict[str, tuple[int, str]],
     raters: dict[str, Rater],
     writer_spy: Spy | None,
-) -> dict[str, int]:
+    budget: Budget,
+    new_ceiling: Decimal | None,
+) -> tuple[dict[str, int], Decimal, str | None]:
     async with start_writer(study, spy=writer_spy) as writer:
-        if pairs:
-            await dispatch(
-                study, pairs, raters, writer=writer, seed=cfg.seed,
-                concurrency=cfg.concurrency, collect=collect,
+        if new_ceiling is not None:
+            await writer.do(
+                "set_ceiling", lambda conn: set_ceiling(conn, new_ceiling, test, "resume")
             )
-        return await writer.do("state_counts", lambda conn: state_counts(conn, test))
+        paused = await dispatch(
+            study, pairs, raters, writer=writer, seed=cfg.seed,
+            concurrency=cfg.concurrency, collect=collect, budget=budget,
+        )
+        if paused is None:  # the pause is cleared only once the resume did not pause again
+            await writer.do("set_paused", lambda conn: set_paused(conn, test, None))
+        states, committed = await writer.do(
+            "state_counts", lambda conn: (state_counts(conn, test), committed_usd(conn))
+        )
+        return states, committed, paused
 
 
 def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
-    """``model_id -> Rater``; one Rater per provider. Only ``fake`` exists so far."""
-    by_provider: dict[str, Rater] = {}
+    """``model_id -> Rater``. Only ``fake`` exists so far: one ``FakeRater`` per Model,
+    reporting that Model's ``fake`` usage (they share the provider's semaphore)."""
     out: dict[str, Rater] = {}
     for model_id in model_ids:
-        provider = cfg.model_by_id(model_id).provider
-        if provider not in by_provider:
-            if provider != "fake":
-                raise ConsortiumError(
-                    "provider_unavailable",
-                    f"model {model_id}: provider {provider!r} has no adapter yet (Epic 2)",
-                )
-            by_provider[provider] = FakeRater()
-        out[model_id] = by_provider[provider]
+        model = cfg.model_by_id(model_id)
+        if model.provider != "fake":
+            raise ConsortiumError(
+                "provider_unavailable",
+                f"model {model_id}: provider {model.provider!r} has no adapter yet (Epic 2)",
+            )
+        fake = model.fake_settings
+        out[model_id] = FakeRater(input_tokens=fake.input_tokens, output_tokens=fake.output_tokens)
     return out
 
 
@@ -509,9 +680,15 @@ def _render_all(
 
 
 def _refuse_if_open(study: Path, test: str) -> None:
-    if read_only(study, lambda conn: count_trials(conn, test)):
+    found = read_only(study, lambda conn: (count_trials(conn, test), paused_reason(conn, test)))
+    if found and found[0]:
+        hint = (
+            "; it is paused at the ceiling, use --resume --ceiling <higher>"
+            if found[1] == "ceiling" else ""
+        )
         raise ConsortiumError(
-            "test_already_open", f"Test {test!r} already has Trials; use --resume to continue it"
+            "test_already_open",
+            f"Test {test!r} already has Trials; use --resume to continue it{hint}",
         )
 
 
@@ -519,24 +696,41 @@ def _run(
     study: Path,
     test: str,
     prepared: _Prepared,
+    new_ceiling: Decimal | None,
     *,
     yes: bool,
     confirm: Confirm | None,
     announce: Announce | None,
     writer_spy: Spy | None,
 ) -> OpenSummary:
-    cfg, plan, requests, instrument_order, rel, test_sha256 = prepared
+    ctx, plan, requests = prepared
+    cfg, instrument_order, rel, test_sha256 = (
+        ctx.cfg, ctx.instrument_order, ctx.rel, ctx.test_sha256
+    )
     pairs, digest = _render_all(plan, requests)
     model_ids = list(dict.fromkeys(s.model_id for s in plan.sessions))
-    raters = raters_for(cfg, model_ids)
-    providers = list(dict.fromkeys(r.provider for r in raters.values()))
+    providers = _providers(cfg, model_ids)
     _refuse_if_open(study, test)
+    estimate = ctx.estimate(plan.trials, (r for _, r in pairs))
+    ceiling, committed = _resolve_ceiling(study, new_ceiling)
+    shown = dataclasses.replace(
+        _summarize(plan, instrument_order, False, digest),
+        estimate=estimate, ceiling=ceiling, committed_before=committed,
+    ).lines()
+    if announce is not None:
+        announce(shown)
+    _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
+                     estimate.expected, fresh=True)
+    raters_for(cfg, model_ids)  # provider_unavailable before confirmation
     if not yes:
         if confirm is None:
             raise ConsortiumError(
                 "confirmation_required", "stdin is not a terminal; pass --yes to confirm"
             )
-        prompt = f"requests sha256: {digest}\nRun {len(pairs)} Trials on {', '.join(providers)}?"
+        prompt = (
+            f"requests sha256: {digest}\nRun {len(pairs)} Trials on {', '.join(providers)}"
+            f"{_ceiling_prompt(new_ceiling)}?"
+        )
         if not confirm(prompt):
             raise ConsortiumError("not_confirmed", "Run not confirmed; nothing was sent")
 
@@ -550,20 +744,33 @@ def _run(
                 raise changed
         except OSError as err:
             raise changed from err
-        cfg, plan2, requests2, _, _, sha_now = _plan_and_render(study, test)
-        _, digest_now = _render_all(plan2, requests2)
-        raters_now = raters_for(cfg, model_ids)
+        ctx_now, plan2, requests2 = _plan_and_render(study, test)
+        pairs2, digest_now = _render_all(plan2, requests2)
+        raters_now = raters_for(ctx_now.cfg, model_ids)
         if (
-            sha_now != test_sha256
+            ctx_now.test_sha256 != test_sha256
             or digest_now != digest
-            or [r.provider for r in raters_now.values()] != [r.provider for r in raters.values()]
+            or _providers(ctx_now.cfg, model_ids) != providers
+            or ctx_now.estimate(plan2.trials, (r for _, r in pairs2)) != estimate
         ):
             raise changed
-        summary = _summarize(plan, instrument_order, False, digest)
+        before = (ceiling, committed)
+        ceiling, committed = _resolve_ceiling(study, new_ceiling)
+        _enforce_ceiling(ceiling, committed, new_ceiling, ctx_now.uncapped_ok(model_ids),
+                         estimate.expected, fresh=True)
+        if (ceiling, committed) != before:
+            raise changed
+        summary = dataclasses.replace(
+            _summarize(plan, instrument_order, False, digest),
+            estimate=estimate, ceiling=ceiling, committed_before=committed,
+        )
         if announce is not None:
-            announce(summary.lines())
-        states = asyncio.run(_dispatch_all(study, cfg, plan, pairs, raters, writer_spy))
-    return dataclasses.replace(summary, states=states)
+            announce([line for line in summary.lines() if line not in shown])
+        states, committed_after, paused = asyncio.run(
+            _dispatch_all(study, cfg, plan, pairs, raters_now, writer_spy,
+                          ctx_now.budget(test, ceiling), new_ceiling)
+        )
+    return dataclasses.replace(summary, states=states, committed=committed_after, paused=paused)
 
 
 async def _dispatch_all(
@@ -573,13 +780,23 @@ async def _dispatch_all(
     pairs: list[tuple[Trial, TrialRequest]],
     raters: dict[str, Rater],
     writer_spy: Spy | None,
-) -> dict[str, int]:
+    budget: Budget,
+    new_ceiling: Decimal | None,
+) -> tuple[dict[str, int], Decimal, str | None]:
     async with start_writer(study, spy=writer_spy) as writer:
         await writer.do("insert_plan", lambda conn: insert_plan(conn, plan.test, plan.trials))
-        await dispatch(
-            study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency
+        if new_ceiling is not None:
+            await writer.do(
+                "set_ceiling", lambda conn: set_ceiling(conn, new_ceiling, plan.test, "run")
+            )
+        paused = await dispatch(
+            study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency,
+            budget=budget,
         )
-        return await writer.do("state_counts", lambda conn: state_counts(conn, plan.test))
+        states, committed = await writer.do(
+            "state_counts", lambda conn: (state_counts(conn, plan.test), committed_usd(conn))
+        )
+        return states, committed, paused
 
 
 def _read_registration(study: Path, test: str) -> tuple[dict, dict[str, dict]]:
@@ -604,12 +821,12 @@ def plan_and_render(
     Every check runs before the Plan is returned; rendering can still raise
     ``unknown_clip`` while the iterator is consumed.
     """
-    _, plan, requests, instrument_order, _, _ = _plan_and_render(Path(study_dir), test)
-    return plan, requests, instrument_order
+    ctx, plan, requests = _plan_and_render(Path(study_dir), test)
+    return plan, requests, ctx.instrument_order
 
 
-# cfg, plan, lazily rendered requests, Instrument order, registered path, registered SHA-256
-_Prepared = tuple[StudyConfig, Plan, Iterator[TrialRequest], list[str], str, str]
+# render context, plan, lazily rendered requests (plan order)
+_Prepared = tuple["_Context", Plan, Iterator[TrialRequest]]
 
 
 @dataclass(frozen=True)
@@ -625,6 +842,36 @@ class _Context:
     instruments: dict[str, InstrumentDef]
     practice: dict[str, list]
     clip_sha256: dict[str, str]
+    prices: PricesConfig
+    clip_seconds: dict[str, float]
+    max_retries: int  # the Test's effective session.max_retries
+
+    def estimate(
+        self, trials: Sequence[Trial], requests: Iterator[TrialRequest]
+    ) -> PlanEstimate:
+        """``core.cost.estimate_plan`` over ``trials`` and their requests (same order)."""
+        return estimate_plan(
+            trials, requests, self.cfg, self.prices, self.clip_seconds,
+            max_retries=self.max_retries,
+        )
+
+    def uncapped_ok(self, model_ids: Sequence[str]) -> bool:
+        """True when every Model is Fake and priced 0, so a Run may go without a ceiling."""
+        for model_id in model_ids:
+            price = self.prices.models[model_id]
+            if (
+                self.cfg.model_by_id(model_id).provider != "fake"
+                or price.input_usd_per_mtok != 0
+                or price.output_usd_per_mtok != 0
+            ):
+                return False
+        return True
+
+    def budget(self, test: str, ceiling: Decimal | None) -> Budget:
+        return Budget(
+            test=test, models={m.id: m for m in self.cfg.models}, prices=self.prices,
+            clip_seconds=self.clip_seconds, ceiling=ceiling,
+        )
 
     def render(self, trial: Trial) -> TrialRequest:
         if trial.persona_id not in self.cards:
@@ -649,6 +896,7 @@ class _Context:
 def _load_context(study: Path, test: str) -> tuple[_Context, TestConfig, list]:
     """The registered Test's checks and render inputs (see ``open_test`` for the errors)."""
     cfg = load_study(study)
+    prices = load_prices(study)
     row, clip_rows = _read_registration(study, test)
     if row["kind"] == "main":
         raise ConsortiumError(
@@ -715,6 +963,9 @@ def _load_context(study: Path, test: str) -> tuple[_Context, TestConfig, list]:
             for name in test_cfg.instruments
         },
         clip_sha256={clip_id: c["sha256"] for clip_id, c in clip_rows.items()},
+        prices=prices,
+        clip_seconds={clip_id: c["duration_s"] for clip_id, c in clip_rows.items()},
+        max_retries=test_cfg.effective_session(cfg).max_retries,
     )
     return ctx, test_cfg, personas
 
@@ -723,4 +974,4 @@ def _plan_and_render(study: Path, test: str) -> _Prepared:
     ctx, test_cfg, personas = _load_context(study, test)
     plan = plan_test(test_cfg, ctx.cfg, personas, ctx.instruments)
     requests = (ctx.render(trial) for trial in plan.trials)
-    return ctx.cfg, plan, requests, ctx.instrument_order, ctx.rel, ctx.test_sha256
+    return ctx, plan, requests

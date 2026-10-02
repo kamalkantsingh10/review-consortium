@@ -125,12 +125,13 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 
 ### `consortium open TEST [--dry-run] [--yes] [--ceiling USD] [--resume] [--study PATH]`
 
-Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` is checked now (a decimal amount greater than 0, for example `5.00`, else `bad_ceiling`) but not yet used (story 1.9). Without `--dry-run`, `--resume` continues a stopped Run (see [Resume](#resume)); with `--dry-run` it is ignored.
+Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` sets the Study's cost ceiling (a decimal amount greater than 0, for example `5.00`, else `invalid_ceiling`; see [Cost and ceiling](#cost-and-ceiling)). Without `--dry-run`, `--resume` continues a stopped Run (see [Resume](#resume)); with `--dry-run` it is ignored.
 
 - `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
 - **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card).
 - **Plans** every Session and Trial (see [Sessions and Trials](#sessions-and-trials)) and **renders every request** (see [Trial requests](#trial-requests)), one at a time, so a broken Instrument, card or missing Clip fails here rather than mid-Run. `requests sha256` is the SHA-256 of the canonical JSON of every request concatenated in plan order (Sessions in order, Trials by `trial_index`); the same seed and inputs give the same digest in any folder.
-- **A dry run writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted, no cost is estimated.
+- **Estimates the cost** of every planned Trial with the one offline cost formula (see [Cost and ceiling](#cost-and-ceiling)); nothing is sent to a provider for token counts or prices.
+- **A dry run writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted and no ceiling is logged (a `--ceiling` given with `--dry-run` is only shown).
 - On success, a dry run prints the counts to stdout and exits `0`. For a pilot Test with 64 Personas, 1 Model, 3 Repeats, `godspeed` over 4 Clips and `pairwise_alive` over the same 4 Clips:
 
   ```text
@@ -142,6 +143,9 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
   by instrument: godspeed 768, pairwise_alive 2304
   by type: single 768, pairwise 2304
   requests sha256: <64 lowercase hex digits>
+  cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2)
+  cost covers: 3072 Trials; Clips go to: fake
+  ceiling: none, committed before: 0 USD
   ```
 
   Models are listed in the Test's order, Instruments in the Test's order; `by type` counts single-Clip and pairwise Trials.
@@ -158,27 +162,30 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
 | `board.db` is corrupt or SQLite cannot read it | `board_unreadable`, exit `1` |
 | The registered file changed while it was being validated | `test_changed`, exit `1` |
 | Config changed since `push test` so the Test no longer passes its checks (for example `session.practice_clips` raised, a Model's `limits` tightened, an Instrument disabled or now pairwise with fewer than 2 targets) | `bad_practice`, `media_limit_exceeded`, `unknown_instrument` or `bad_pairing`, exit `1` |
-| `--ceiling` not a decimal amount greater than 0 | `bad_ceiling`, exit `1` |
+| `--ceiling` not a decimal amount greater than 0 (for example `-1`) | `invalid_ceiling`, exit `1`; nothing changes |
 | `--resume` without `--dry-run` | Continues a stopped Run; see [Resume](#resume) |
 
 #### Run
 
 `open TEST` without `--dry-run` does everything a dry run does (same checks, same plan, same requests, so the Run dispatches exactly the requests behind the dry run's `requests sha256`), then, in order:
 
-1. Refuses a `kind: main` Test (`protocol_lock_unavailable`, see above) and any Model whose provider has no adapter yet (`provider_unavailable`; only `fake` exists in this version). Nothing is written and no `board.lock` is created. If `board.db` is at an older layout version, the Run first takes the lease, migrates it, and releases the lease (a dry run never migrates).
+1. Refuses a `kind: main` Test (`protocol_lock_unavailable`, see above). Nothing is written and no `board.lock` is created. If `board.db` is at an older layout version, the Run first takes the lease, migrates it, and releases the lease (a dry run never migrates).
 2. Refuses a Test that already has Trials in `board.db`: `test_already_open`, nothing written (continue a stopped Run with `--resume`). A dry run of an open Test still works.
-3. Asks on stderr, before taking the lease (default no):
+3. Prints the summary lines to stdout, exactly as a dry run does (without `dry run`), including the cost estimate and the ceiling it will run under. Then applies the ceiling rules (see [Cost and ceiling](#cost-and-ceiling)): `ceiling_required` or `over_ceiling`, exit `1`, nothing written. Then refuses any Model whose provider has no adapter yet (`provider_unavailable`; only `fake` exists in this version). Nothing is written and no `board.lock` is created.
+4. Asks on stderr, before taking the lease (default no):
 
    ```text
    requests sha256: <64 lowercase hex digits>
    Run N Trials on <providers>? [y/N]:
    ```
 
-   `--yes` skips the question. Answering anything but yes, or end of input / Ctrl-C at the prompt: `not_confirmed`; stdin not a terminal and no `--yes`: `confirmation_required`. Either way no Trial is stored and no Archive line is written.
-4. Takes the exclusive lease on `board.lock` (`fcntl.flock`, held for the rest of the command; the OS releases it if the process dies). If another dispatching command holds it: `study_busy`, nothing written. Under the lease it re-checks that the Test has no Trials (`test_already_open`) and that the registered Test file's SHA-256, the requests digest and the providers are unchanged since the confirmation (else `test_changed`), nothing written.
-5. Prints the summary lines (as for a dry run, without `dry run`, ending with `requests sha256`) to stdout, stores every planned Trial as `planned` (attempt `0`) in one transaction, then sends every Trial through the engine.
+   With `--ceiling X` the question reads `Run N Trials on <providers>, ceiling X USD (study-wide)? [y/N]:` (and likewise for `Resume`).
 
-Per attempt, in this order: (1) `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)); (2) the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the Trial takes its terminal state: category `ok` gives `valid`, any other category `failed` (response validation arrives in story 1.10). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
+   `--yes` skips the question. Answering anything but yes, or end of input / Ctrl-C at the prompt: `not_confirmed`; stdin not a terminal and no `--yes`: `confirmation_required`. Either way no Trial is stored, no Archive line, ledger row or ceiling change is written. Nothing reaches a Rater (not even a Clip upload, `prepare`) before this point.
+5. Takes the exclusive lease on `board.lock` (`fcntl.flock`, held for the rest of the command; the OS releases it if the process dies). If another dispatching command holds it: `study_busy`, nothing written. Under the lease it re-checks that the Test has no Trials (`test_already_open`) and that the registered Test file's SHA-256, the requests digest, the cost estimate and the providers are unchanged since the confirmation (else `test_changed`), nothing written; the ceiling rules are applied again against the committed spend now in `board.db`.
+6. Stores every planned Trial as `planned` (attempt `0`) in one transaction, logs `--ceiling` if given (see [Cost and ceiling](#cost-and-ceiling)), then sends every Trial through the engine.
+
+Per attempt, in this order: (1) the attempt's estimated cost is reserved in the ledger, `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)), all in one transaction, which is refused (nothing written) when the reservation would cross the ceiling (see [Cost and ceiling](#cost-and-ceiling)); (2) the attempt's Clips are prepared (uploaded) for the Rater, only after a successful reservation, and the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the attempt's actual cost, computed from the returned usage, is recorded in the ledger (when the answer has no usage the reservation stands; an attempt with no ledger row, recorded before the ledger existed, gets one reserving its estimate); (7) the Trial takes its terminal state: category `ok` gives `valid`, any other category `failed` (response validation arrives in story 1.10). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
 
 **State after a stopped Run (resume contract).** Every Trial is in one of these states, and `--resume` handles each (see [Resume](#resume)):
 
@@ -188,18 +195,24 @@ Per attempt, in this order: (1) `attempt` is incremented and the attempt is reco
 - `sent` without a handle: stopped while submitting (the request is archived); re-dispatch it with a new attempt.
 - terminal (`valid`, `invalid`, `refused`, `failed`): done; it always has its response line.
 
-On success it adds the Trials by state to the summary and exits `0`, even when some Trials ended `failed`; then it also prints `warning: N Trials did not end valid` to stderr:
+On success it adds the Trials by state and a cost footer (Study-wide committed spend and the ceiling, `none` for an uncapped Run) to the summary and exits `0`, even when some Trials ended `failed`; then it also prints `warning: N Trials did not end valid` to stderr:
 
 ```text
 test: pilot1 (pilot)
 ...
 requests sha256: <64 lowercase hex digits>
+cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2)
+cost covers: 3072 Trials; Clips go to: fake
+ceiling: 5 USD, committed before: 0 USD
 states: valid 3072
+cost: committed <usd> USD, ceiling 5 USD
 ```
+
+If the Run pauses at the ceiling, the summary ends with `paused: ceiling`, and the command exits `1` with `ceiling_reached: ...` on stderr (see [Cost and ceiling](#cost-and-ceiling)).
 
 **Trial states.** `planned` (stored, not yet sent), `sent` (submitted; not necessarily answered), then one of the terminal states `valid`, `invalid`, `refused`, `failed`. Terminal states never change. This version produces only `valid` and `failed`.
 
-**Fake rater** (`provider: fake`). Deterministic, offline and free. It answers each Item from `random.Random(<attempt seed>)` in the request's Item order: a Likert Item `randint(1, points)`, a pairwise Item one of its options (a position, `A` or `B`), a free-text Item the fixed string `fake answer`. The raw answer is the canonical JSON `{item_id: value}`, which matches the Instrument's response schema. Usage is `{"input_tokens": 0, "output_tokens": 0}`, model build `fake-1`, category `ok`. Its handle carries the answer itself, so it can be collected after a restart.
+**Fake rater** (`provider: fake`). Deterministic, offline and free. It answers each Item from `random.Random(<attempt seed>)` in the request's Item order: a Likert Item `randint(1, points)`, a pairwise Item one of its options (a position, `A` or `B`), a free-text Item the fixed string `fake answer`. The raw answer is the canonical JSON `{item_id: value}`, which matches the Instrument's response schema. Usage is `{"input_tokens": I, "output_tokens": O}` from the Model's `fake` settings in `study.yaml` (default `0` and `0`), so its cost is priced from `prices.yaml` like any Model's; model build `fake-1`, category `ok`. Its handle carries the answer itself, so it can be collected after a restart.
 
 | Situation | Result |
 | --- | --- |
@@ -209,7 +222,7 @@ states: valid 3072
 | Another dispatching command holds `board.lock` | `study_busy`, exit `1`; nothing written |
 | The Test already has Trials | `test_already_open` (`...; use --resume to continue it`), exit `1`; nothing written |
 | `kind: main` Test | `protocol_lock_unavailable`, exit `1`; nothing written |
-| A Model of the Test uses a provider other than `fake` | `provider_unavailable`, exit `1`; nothing written |
+| A Model of the Test uses a provider other than `fake` | `ceiling_required` without a ceiling, else `provider_unavailable`; exit `1`; nothing written |
 
 #### Resume
 
@@ -217,7 +230,7 @@ states: valid 3072
 
 1. The same checks as a Run up to planning (a `kind: main` Test is refused with `protocol_lock_unavailable`; `test_exists`, config, Panel and Clip checks). An older `board.db` layout is migrated under the lease first.
 2. Refuses a Test with no Trials in `board.db`: `test_not_open`, nothing written.
-3. Takes Raters only for the Models of the non-terminal Trials (a Model whose Trials are all terminal never blocks a resume): `unknown_model` if one is no longer in `study.yaml`, `provider_unavailable` if its provider has no adapter.
+3. Takes Raters only for the Models of the non-terminal Trials (a Model whose Trials are all terminal never blocks a resume): `unknown_model` if one is no longer in `study.yaml`, `provider_unavailable` if its provider has no adapter. Before that it prints the summary lines with the cost estimate of the **non-terminal Trials only** and the ceiling, and applies `ceiling_required` and the `--ceiling` below committed spend check (but not the `expected` check of `over_ceiling`: a resume runs until the ceiling pauses it).
 4. If any Trial is not terminal, asks on stderr as a Run does, counting only the non-terminal Trials (default no; `--yes` skips it; `not_confirmed` / `confirmation_required` as for a Run, nothing written):
 
    ```text
@@ -226,14 +239,65 @@ states: valid 3072
    ```
 
    `requests sha256` is over every stored Trial's re-rendered request in plan order, so it equals the Run's (and the dry run's) digest when nothing changed. When every Trial is terminal there is nothing to confirm.
-5. Takes the `board.lock` lease (`study_busy` if another dispatcher holds it, nothing written; a killed Run never blocks, since the OS releases its lock). Under the lease it re-checks the Test has Trials (`test_not_open`) and that the Test file's bytes (hashed again), the requests digest, the non-terminal Trials (state, attempt, handle) and the providers are unchanged since the confirmation (else `test_changed`, nothing written).
+5. Takes the `board.lock` lease (`study_busy` if another dispatcher holds it, nothing written; a killed Run never blocks, since the OS releases its lock). Under the lease it re-checks the Test has Trials (`test_not_open`) and that the Test file's bytes (hashed again), the requests digest, the non-terminal Trials (state, attempt, handle), the cost estimate and the providers are unchanged since the confirmation (else `test_changed`, nothing written).
 6. Runs the **re-issue check** (below); a mismatch is `reissue_mismatch`, nothing written.
-7. Prints the summary lines (as for a Run) plus `resume: collect C, new attempt A, terminal T, archive fragments F` (F = crash fragments skipped in the two Archive files), then sends the non-terminal Trials through the engine:
+7. Prints `resume: collect C, new attempt A, terminal T, archive fragments F` (F = crash fragments skipped in the two Archive files), logs `--ceiling` if given, then sends the non-terminal Trials through the engine (each new attempt reserves as in a Run; a collected attempt was reserved when it was sent):
    - terminal (`valid`, `invalid`, `refused`, `failed`): untouched, never re-sent;
    - `sent` whose latest attempt has a stored handle: collected at that same attempt (steps 5 and 6 only: no new attempt, no new request line); its response line carries the archived `request_sha256` (a stored handle that is not a JSON object stops the resume with `adapter_error: stored handle unreadable for <trial_id>`);
    - `planned` (attempt `0`, or `>= 1` after a stop between recording the attempt and marking it `sent`) and `sent` without a handle: a new attempt (steps 1 to 6, new seed, new request line). Attempt numbers are never reused, and an attempt that was never marked `sent` is never collected.
 
-It ends like a Run: Trials by state, exit `0` (with the `warning:` line if some did not end `valid`). With nothing to resume it dispatches nothing, prints the counts and exits `0`.
+   The Test's pause (`paused_reason`) is cleared only when the resume ends without pausing again.
+
+It ends like a Run: Trials by state and the cost footer, exit `0` (with the `warning:` line if some did not end `valid`), or `paused: ceiling` and `ceiling_reached`, exit `1`, if it paused again. With nothing to resume it dispatches nothing and writes nothing (no ceiling change, the pause is kept), prints the counts and exits `0`.
+
+#### Cost and ceiling
+
+**One cost formula.** Every figure comes from one offline function (`core.cost.estimate`); no provider is ever asked for token counts or prices. For one attempt of one Trial on Model `m` with `p = prices.yaml models.<m>`:
+
+- media tokens = ceil(Σ `duration_s` of every Clip the request shows, Practice examples and targets, each appearance counted, × `p.media_tokens_per_s`);
+- text tokens = ceil(characters of the request's canonical JSON ÷ `p.chars_per_token`);
+- cost (USD) = (media + text tokens) × `p.input_usd_per_mtok` ÷ 10^6 + the Model's `max_output_tokens` × `p.output_usd_per_mtok` ÷ 10^6.
+
+USD amounts are exact decimals, stored and printed as decimal strings (no exponent, trailing zeros dropped: `5.00` prints as `5`).
+
+**Estimate.** `expected` is the sum of that cost over every Trial the open would send (all planned Trials for a Run or dry run, covering both pairwise orders, every Repeat and the Practice clips; the non-terminal Trials for `--resume`). `worst_case` = `expected` × (1 + `max_retries`), with the Test's effective `session.max_retries`. Both are printed side by side with the number of Trials and the providers that will receive Clips:
+
+```text
+cost estimate: expected 0.4183 USD, worst case 1.2549 USD (max_retries 2)
+cost covers: 256 Trials; Clips go to: fake
+ceiling: 5 USD, committed before: 0 USD
+```
+
+A dry run and a Run of the same Plan print identical `cost estimate` and `cost covers` lines.
+
+**Ceiling.** The ceiling is Study-wide (it covers every Test) and lives in `board.db`, never in a file. `--ceiling USD` appends a row to `ceiling_changes` (UTC timestamp, previous ceiling, new ceiling, Test, `run` or `resume`) once a Run or resume with something to send is confirmed, under the lease (never for a dry run, a refused or declined open); the current ceiling is the latest row. A `--ceiling` below the committed spend is refused: `over_ceiling: committed C > ceiling Y; nothing was sent`. Committed spend is the Study-wide sum over the ledger of each attempt's actual cost, or its reservation where the actual cost is unknown.
+
+- No ceiling has ever been set and none is given: `ceiling_required`, exit `1`, unless every Model the open sends to has `provider: fake` **and** is priced `0` (input and output) in `prices.yaml`; such a Run runs uncapped (it still reserves and records costs, and never pauses; its footer reads `ceiling none`).
+- A Run refuses `over_ceiling: expected X > ceiling Y; nothing was sent` (prefixed `committed C + ` when earlier spend exists), exit `1`, when committed spend + `expected` > ceiling. Only `expected` is compared; when `expected` <= ceiling < `worst_case` both are printed and the Run starts, and the per-attempt pause guards retries.
+- **Per-attempt reservation.** Before each attempt the engine reserves that attempt's estimated cost. The check (committed + reservation <= ceiling), the ledger row and the attempt increment are one transaction on the single writer, so concurrent dispatch never lets a *reservation* cross the ceiling, an exact fit is dispatched, and a refused reservation leaves no attempt and no ledger row. The writer keeps committed spend as a running total (read once per Run). Clips are prepared (uploaded) only after the reservation succeeds.
+- **Reservations are estimates.** An attempt's actual cost replaces its reservation once known and can be higher. If it pushes committed spend over the ceiling, the Run pauses at once (no new attempt starts, in-flight attempts are collected) and stderr shows `ceiling_overshoot: committed X > ceiling Y (actual cost exceeded the estimate)` before `ceiling_reached`. So the ceiling is never crossed by a reservation; an under-estimate can cross it by at most the attempts in flight.
+- **Pause.** When the next reservation would cross the ceiling, that attempt is not reserved or sent, no new attempt starts, attempts already in flight are still collected, and the Test's `paused_reason` becomes `ceiling` (`paused: ceiling`; stored even if the Run then stops on an error). The command prints `paused: ceiling` as the last summary line, the `warning:` line, and exits `1` with `ceiling_reached: ...`. Untried Trials stay `planned`. A dry run of a paused Test ends with `paused: ceiling`; opening it again without `--resume` is `test_already_open: ...; it is paused at the ceiling, use --resume --ceiling <higher>`.
+- **Dry run.** A dry run applies the same rules as a Run and, if the Run would be refused, adds `would refuse: ceiling_required` or `would refuse: over_ceiling` after the ceiling line; it still exits `0`.
+- **Resume.** `open TEST --resume --ceiling <higher>` logs the new ceiling, shows the estimate of the remaining Trials and continues without re-sending a completed Trial. `--resume` without a higher ceiling pauses again before any send it cannot afford (`ceiling_reached`).
+
+| Situation | Result |
+| --- | --- |
+| Estimate shown, answer `y` | Runs |
+| Answer `n` | `not_confirmed`, exit `1`; nothing dispatched, no ledger row, no ceiling change |
+| committed + `expected` > ceiling | `over_ceiling: expected X > ceiling Y`, exit `1`; nothing dispatched |
+| `expected` <= ceiling < `worst_case` | Both printed; runs; the pause guards retries |
+| No ceiling ever set, a non-Fake Model, no `--ceiling` | `ceiling_required`, exit `1`; nothing dispatched |
+| No ceiling, every Model `provider: fake` and priced `0` | Runs uncapped; footer `ceiling none` |
+| No ceiling, a Fake Model priced above `0` | `ceiling_required`, exit `1` |
+| `--ceiling` below committed spend | `over_ceiling: committed C > ceiling Y`, exit `1`; nothing logged |
+| An actual cost pushes committed spend over the ceiling | `ceiling_overshoot: ...` warning, pause, `ceiling_reached`, exit `1` |
+| `--ceiling -1` | `invalid_ceiling`, exit `1`; nothing changes |
+| committed + reservation == ceiling | Dispatched (`<=`) |
+| The next reservation crosses the ceiling mid-Run | In-flight attempts collected, `paused: ceiling`; `ceiling_reached`, exit `1` |
+| Paused Run, `--resume --ceiling <higher>` | Change logged, remaining estimate shown, continues with no re-send |
+| Paused Run, `--resume` at the same ceiling | Pauses again before any send; `ceiling_reached`, exit `1` |
+| An attempt ends without usage | Its reservation counts as its cost |
+| A Model has no `prices.yaml` entry | `config_invalid` (field `models.<id>`, file `prices.yaml`) on every `open`; nothing dispatched |
 
 **Re-issue check.** It runs under the `board.lock` lease (as `--resume` does), so no dispatcher writes meanwhile. Every attempt marked `sent` must have a request line and no `(trial_id, attempt)` may have more than one (else `reissue_mismatch`). For every `archive/requests.jsonl` line of the Test, the canonical JSON of the request re-rendered from the stored Trial row and the current Study folder must equal the archived `request` bytes, its SHA-256 must equal `request_sha256`, and the line's `seed` and `model_id` must be those of its attempt (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`) and Trial. If a Study input that affects requests (a Persona card, an Instrument, a Clip row) was edited after the Test was opened, the check fails with `reissue_mismatch` instead of mixing request versions.
 
@@ -291,7 +355,7 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `push_failed` | `push clip`, `push test` | The file system or SQLite failed while storing the Clip or Test; nothing was stored. For `push clip` the message names no source path. |
 | `board_busy` | any command that writes `board.db` | Another process holds the `board.db` lock past the busy timeout. Try again. |
 | `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates, such as `open --dry-run`) also raises it for an older version. |
-| `board_unreadable` | any read-only command (`open --dry-run`) | `board.db` is corrupt or SQLite cannot open or read it. |
+| `board_unreadable` | any read-only command (`open --dry-run`), `open` | `board.db` is corrupt or SQLite cannot open or read it, or a ledger amount is not a decimal. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
 | `panel_exists` | `personas generate` | `panel/personas/` already holds files; pass `--force` to replace them. |
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
@@ -307,7 +371,11 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `media_limit_exceeded` | `push test`, `open` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
 | `unknown_test` | `open` | The Test is not registered (or there is no `board.db` yet). |
 | `protocol_lock_unavailable` | `open` | The Test is `kind: main` (main Tests open only once the Protocol lock exists, Epic 4), or is otherwise registered as not openable. |
-| `bad_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0. |
+| `invalid_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0; nothing changed. |
+| `ceiling_required` | `open` | No cost ceiling has ever been set and none was given, and a Model the open sends to is not `provider: fake` priced `0`; nothing was sent. |
+| `over_ceiling` | `open` | Committed spend plus the Run's expected cost exceeds the ceiling (`[committed C + ]expected X > ceiling Y`), or `--ceiling` is below committed spend (`committed C > ceiling Y`); nothing was sent or logged. |
+| `ceiling_overshoot` | `open` (stderr warning) | An attempt's actual cost exceeded its estimate and pushed committed spend over the ceiling; the Run paused. |
+| `ceiling_reached` | `open`, `open --resume` | The Run paused because the next attempt's reservation would cross the ceiling; in-flight attempts were collected. Continue with `--resume --ceiling <higher>`. |
 | `unknown_prompt_variant` | `open` | A Trial's Prompt variant is not defined by its Instrument (an internal consistency check). |
 | `provider_unavailable` | `open` | A Model of the Test uses a provider with no adapter yet (only `fake` exists in this version). |
 | `study_busy` | `open` | Another dispatching command holds the `board.lock` lease of this Study. |
@@ -371,7 +439,7 @@ One canonical MP4 per Clip, written by `push clip`. The file name is the Clip ID
 
 ### `board.db`
 
-SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `3`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
+SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `4`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
 
 | Column | Meaning |
 | --- | --- |
@@ -395,11 +463,17 @@ Table `tests` (version 2), one row per registered Test:
 | `openable` | `1`, or `0` for `kind: main` (not openable until the Protocol lock, Epic 4). |
 | `registered_at` | UTC ISO 8601 time with `Z`. |
 
+Column `paused_reason` (version 4) on `tests`: why the Test's Run is paused (`ceiling`), or empty; cleared by `open --resume`.
+
 Table `test_clips` (version 2), one row per Test and Clip it uses: `test`, `clip_id`, `role` (`target` or `practice`; every Practice Clip listed in `practice:` is recorded, used or not).
 
 Table `trials` (version 3), one row per planned Trial, written by `open`: every Trial field (`trial_id` primary key, `test`, `session_id`, `trial_index`, `instrument`, `clip_ids` as a canonical JSON list in presentation order, `pair_id`, `position`, `prompt_variant`, `order_seed`, `repeat`, `agent_id`, `persona_id`, `model_id`), plus `state` (see [Trial states](#run)), `attempt` (`0` until first dispatched, then the latest attempt number) and `seq` (plan order).
 
 Table `attempts` (version 3), one row per `(trial_id, attempt)` (primary key): `seed` (the attempt's derived Model seed), `handle` (the Rater's handle as canonical JSON, once submitted), `sent_at`, `answered_at` (UTC ISO 8601 with milliseconds and `Z`) and `category` (the Rater's result category, `ok` or a snake_case reason). Indexed by `trial_id`.
+
+Table `ledger` (version 4), one row per `(trial_id, attempt)` (primary key) that was reserved: `model_id`, `reserved_usd` (the attempt's estimated cost, written in the same transaction as its `attempts` row) and `actual_usd` (from the returned usage; empty until known, or when the answer had no usage). USD as decimal strings.
+
+Table `ceiling_changes` (version 4), one row per `open --ceiling`: `ts` (UTC ISO 8601 with milliseconds and `Z`), `previous_usd` (empty for the first), `ceiling_usd`, `test` (the Test opened) and `command` (`run` or `resume`). The latest row (insertion order) is the current, Study-wide ceiling.
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
@@ -455,6 +529,7 @@ All values below are what `init` writes. Fields marked *required* have no defaul
 | `models[].model` | *Required.* The model version to call (template: `fake-1`). Refused: an empty or blank name, and any name ending in `latest` (case-insensitive, for example `gemini-latest`). No other check is made that the name is pinned. |
 | `models[].settings.temperature` | > 0; template `0.7`. |
 | `models[].max_output_tokens` | *Required.* Integer > 0; template `512`. |
+| `models[].fake` | Fake rater settings, only for `provider: fake` (on another provider: `config_invalid`, field `models.<i>`): `input_tokens` and `output_tokens` (integers >= 0, template and default `0`), the usage it reports for every answer. |
 | `models[].limits` | *Required.* What the Model accepts per request: `max_seconds` (> 0, template `600`), `max_bytes` (integer > 0, template `20000000`), `inline_base64` (template `true`; media is sent base64-inline, which counts 4/3 of the file size). |
 | `media` | Canonical Clip encoding: `height` 480 (must be even), `video_kbps` 400, `audio_kbps` 64, `fps` 25. |
 | `session.practice_clips` | Practice examples included per Trial per Instrument (>= 0); template `2`. |
@@ -508,6 +583,10 @@ Prompt variants are not chosen in the Test; they rotate by Repeat (see [Sessions
 | --- | --- |
 | `schema_version` | *Required.* `1`. |
 | `models.<model id>` | Per Model id: `input_usd_per_mtok` and `output_usd_per_mtok`, USD per million tokens, as quoted non-negative decimal strings (for example `"0.30"`; an unquoted `0.30` is refused). Every Model id in `study.yaml` must have an entry, and no other ids may appear (`config_invalid`, field `models.<id>`). The template prices the fake Model `m1` at `"0"`. |
+| `models.<model id>.media_tokens_per_s` | Input tokens per second of Clip media, a quoted non-negative decimal string; default and template `"300"`. |
+| `models.<model id>.chars_per_token` | Characters of rendered request text per input token, a quoted decimal string greater than 0 (`"0"` is refused); default and template `"4"`. |
+
+These fields feed the one cost formula (see [Cost and ceiling](#cost-and-ceiling)).
 
 ### Instruments
 

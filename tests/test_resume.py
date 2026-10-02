@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,7 @@ from consortium.board import trials as board_trials
 from consortium.board.clips import insert_clip
 from consortium.board.db import connect, transaction
 from consortium.board.lease import LOCK_FILE, acquire_lease
+from consortium.board.ledger import Spend
 from consortium.cli import app
 from consortium.core.errors import ConsortiumError
 from consortium.core.render import canonical_json
@@ -47,7 +49,8 @@ TARGETS = ["c_aaaaaaaa", "c_bbbbbbbb"]
 PRACTICE = ["c_ppppppaa", "c_ppppppab", "c_ppppppac"]
 GODSPEED = {f"animacy_{i}": 3 for i in range(1, 7)} | {f"likeability_{i}": 3 for i in range(1, 6)}
 STEPS = ["begin_attempt", "append_request", "mark_sent", "set_handle", "append_response",
-         "set_state"]
+         "record_actual", "set_state"]
+FOOTER = "cost: committed 0 USD, ceiling none"
 TRIALS = 64 * (2 + 2)  # 64 Personas x 1 Model x 1 Repeat x (2 godspeed + 2 pairwise)
 KILL_AT = 37  # the k-th occurrence of the chosen writer op is the last write before the kill
 
@@ -240,7 +243,9 @@ def _craft_mixed_state(study: Path) -> dict[str, str]:
             if name == "planned_fresh":
                 continue
             tid = trial.trial_id
-            attempt, seed = board_trials.begin_attempt(conn, tid, cfg_seed)
+            attempt, seed = board_trials.begin_attempt(
+                conn, tid, cfg_seed, Decimal(0), None, Spend()
+            )
             if name == "planned_after_begin":
                 continue
             record = append_request(study, trial_id=tid, attempt=attempt, seed=seed,
@@ -293,7 +298,8 @@ def test_resume_after_kill_mixed_states(study: Path) -> None:
     assert not [op for op, key in ops if key and key[0] == ids["valid"]]
     # The handled Trial was only collected: append_response then set_state, attempt 1.
     assert [(op, key) for op, key in ops if key and key[0] == ids["sent_handle"]] == [
-        ("append_response", (ids["sent_handle"], 1)), ("set_state", (ids["sent_handle"], 1))]
+        ("append_response", (ids["sent_handle"], 1)), ("record_actual", (ids["sent_handle"], 1)),
+        ("set_state", (ids["sent_handle"], 1))]
     # Its response carries the archived request's SHA-256.
     tid = ids["sent_handle"]
     assert read_responses(study)[(tid, 1)]["request_sha256"] == \
@@ -364,7 +370,7 @@ def test_all_terminal_dispatches_nothing(study: Path) -> None:
     out = result.stdout.splitlines()
     assert out[0] == "test: pilot1 (pilot)"
     assert f"resume: collect 0, new attempt 0, terminal {TRIALS}, archive fragments 0" in out
-    assert out[-1] == f"states: valid {TRIALS}"
+    assert out[-2:] == [f"states: valid {TRIALS}", FOOTER]
     assert result.stderr == ""
     assert _snapshot(study) == before
 
@@ -376,7 +382,7 @@ def test_resume_digest_matches_dry_run(study: Path) -> None:
     result = _cli("pilot1", "--yes", "--resume", "--study", str(study))
     assert result.exit_code == 0, result.stderr
     assert digest[0] in result.stdout.splitlines()
-    head = dry.stdout.splitlines()[1:-1]  # sessions .. by type: identical counts
+    head = dry.stdout.splitlines()[1:8]  # sessions .. requests sha256: identical counts
     assert result.stdout.splitlines()[1:len(head) + 1] == head
 
 
@@ -666,6 +672,9 @@ def test_resume_migrates_older_board(study: Path) -> None:
 
     from consortium.board.db import DB_FILE
     raw = sqlite3.connect(study / DB_FILE, isolation_level=None)
+    raw.execute("DROP TABLE ledger")
+    raw.execute("DROP TABLE ceiling_changes")
+    raw.execute("ALTER TABLE tests DROP COLUMN paused_reason")
     raw.execute("DROP TABLE attempts")
     raw.execute("DROP TABLE trials")
     raw.execute("PRAGMA user_version = 2")
@@ -684,7 +693,7 @@ def test_trial_state_changed_inside_confirm_is_test_changed(study: Path) -> None
     def change_then_yes(prompt: str) -> bool:
         conn = connect(study)
         try:
-            board_trials.begin_attempt(conn, fresh, _study_seed(study))
+            board_trials.begin_attempt(conn, fresh, _study_seed(study), Decimal(0), None, Spend())
         finally:
             conn.close()
         return True
@@ -749,10 +758,10 @@ def test_unreadable_stored_handle_is_adapter_error(study: Path) -> None:
 
 def test_removed_model_of_terminal_trials_does_not_block(study: Path) -> None:
     assert _cli("pilot1", "--yes", "--study", str(study)).exit_code == 0
-    from consortium.stages.open import _Resumable, _resume_raters
+    from consortium.stages.open import _Resumable, _resume_models
     res = _Resumable([], {}, "", [{"model_id": "m9"}], 0)
     cfg = SimpleNamespace(models=[SimpleNamespace(id="m1", provider="fake")])
     with pytest.raises(ConsortiumError) as info:
-        _resume_raters(cfg, "pilot1", res)  # type: ignore[arg-type]
+        _resume_models(cfg, "pilot1", res)  # type: ignore[arg-type]
     assert info.value.code == "unknown_model"
-    assert _resume_raters(cfg, "pilot1", _Resumable([], {}, "", [], 0)) == {}  # type: ignore
+    assert _resume_models(cfg, "pilot1", _Resumable([], {}, "", [], 0)) == []  # type: ignore

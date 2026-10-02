@@ -48,6 +48,21 @@ DecimalStr = Annotated[
     WithJsonSchema({"type": "string", "pattern": _DECIMAL_PATTERN}),
 ]
 
+_POSITIVE_DECIMAL_PATTERN = r"^(?=.*[1-9])[0-9]+(\.[0-9]+)?$"
+
+
+def _require_positive_decimal_string(value: Any) -> Any:
+    if not isinstance(value, str) or not re.fullmatch(_POSITIVE_DECIMAL_PATTERN, value):
+        raise ValueError('must be a decimal string greater than 0, for example "4"')
+    return value
+
+
+PositiveDecimalStr = Annotated[
+    Decimal,
+    BeforeValidator(_require_positive_decimal_string),
+    WithJsonSchema({"type": "string", "pattern": _POSITIVE_DECIMAL_PATTERN}),
+]
+
 SchemaVersion = Annotated[Literal[1], Field(description="Config file schema version.")]
 
 
@@ -79,6 +94,13 @@ class MediaLimits(_Strict):
     inline_base64: StrictBool = True
 
 
+class FakeSettings(_Strict):
+    """What the Fake rater reports as usage for each answer (story 1.9)."""
+
+    input_tokens: Annotated[StrictInt, Field(ge=0)] = 0
+    output_tokens: Annotated[StrictInt, Field(ge=0)] = 0
+
+
 class ModelConfig(_Strict):
     id: Annotated[StrictStr, Field(pattern=_MODEL_ID_PATTERN)]
     provider: Literal["fake", "gemini", "qwen"]
@@ -86,6 +108,20 @@ class ModelConfig(_Strict):
     settings: ModelSettings = Field(default_factory=ModelSettings)
     max_output_tokens: Annotated[StrictInt, Field(gt=0)]
     limits: MediaLimits
+    fake: FakeSettings | None = Field(
+        default=None, description="Fake rater settings; only for provider: fake."
+    )
+
+    @model_validator(mode="after")
+    def _fake_only_for_fake(self) -> ModelConfig:
+        if self.fake is not None and self.provider != "fake":
+            raise ValueError("fake: only allowed for provider: fake")
+        return self
+
+    @property
+    def fake_settings(self) -> FakeSettings:
+        """The ``fake`` settings, defaults when omitted."""
+        return self.fake or FakeSettings()
 
     @field_validator("model")
     @classmethod
@@ -492,8 +528,16 @@ class CardWording(_Strict):
 
 
 class ModelPrice(_Strict):
+    """Prices in USD per million tokens plus the token formula of ``core.cost`` (story 1.9)."""
+
     input_usd_per_mtok: DecimalStr
     output_usd_per_mtok: DecimalStr
+    media_tokens_per_s: DecimalStr = Field(
+        default=Decimal("300"), description="Input tokens per second of Clip media."
+    )
+    chars_per_token: PositiveDecimalStr = Field(
+        default=Decimal("4"), description="Characters of rendered request text per input token."
+    )
 
 
 class PricesConfig(_Strict):

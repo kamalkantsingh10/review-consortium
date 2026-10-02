@@ -93,3 +93,17 @@ def target_clip_kinds(
     for clip_id, name, kind in rows:
         out.setdefault(clip_id, []).append((name, kind))
     return out
+
+
+def set_paused(conn: sqlite3.Connection, test: str, reason: str | None) -> None:
+    """Store (or, with ``None``, clear) why ``test``'s Run is paused, e.g. ``ceiling``."""
+    with transaction(conn):
+        cur = conn.execute("UPDATE tests SET paused_reason = ? WHERE name = ?", (reason, test))
+        if cur.rowcount != 1:
+            raise KeyError(test)
+
+
+def paused_reason(conn: sqlite3.Connection, test: str) -> str | None:
+    """Why ``test``'s Run is paused (``ceiling``); ``None`` if it is not paused."""
+    row = conn.execute("SELECT paused_reason FROM tests WHERE name = ?", (test,)).fetchone()
+    return row[0] if row else None

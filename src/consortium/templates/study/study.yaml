@@ -20,6 +20,9 @@ models:
       max_seconds: 600
       max_bytes: 20000000
       inline_base64: true   # media sent inline as base64 (counts 4/3 of the file size)
+    fake:                   # provider: fake only; usage it reports per answer
+      input_tokens: 0
+      output_tokens: 0
 
 # Canonical media profile every Clip is re-encoded to at ingest.
 media:

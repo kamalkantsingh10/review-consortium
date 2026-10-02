@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "FakeSettings": {
+      "additionalProperties": false,
+      "description": "What the Fake rater reports as usage for each answer (story 1.9).",
+      "properties": {
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        }
+      },
+      "title": "FakeSettings",
+      "type": "object"
+    },
     "LeakTolerance": {
       "additionalProperties": false,
       "description": "Allowed per-Condition differences; resolution and fps must match exactly.",
@@ -84,6 +104,18 @@
     "ModelConfig": {
       "additionalProperties": false,
       "properties": {
+        "fake": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FakeSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fake rater settings; only for provider: fake."
+        },
         "id": {
           "pattern": "^m[1-9][0-9]*$",
           "title": "Id",

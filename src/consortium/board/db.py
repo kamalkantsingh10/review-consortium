@@ -108,7 +108,41 @@ def m3_trials(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX attempts_by_trial ON attempts (trial_id)")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [m1_clips, m2_tests, m3_trials]
+def m4_cost(conn: sqlite3.Connection) -> None:
+    """Story 1.9: the per-attempt cost ledger, the ceiling change log and a Test's pause.
+
+    USD amounts are decimal strings. ``ceiling_changes`` rows are in insertion
+    (rowid) order; the latest is the current ceiling.
+    """
+    conn.execute(
+        """
+        CREATE TABLE ledger (
+            trial_id     TEXT NOT NULL REFERENCES trials(trial_id),
+            attempt      INTEGER NOT NULL CHECK (attempt >= 1),
+            model_id     TEXT NOT NULL,
+            reserved_usd TEXT NOT NULL,
+            actual_usd   TEXT,
+            PRIMARY KEY (trial_id, attempt)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ceiling_changes (
+            ts           TEXT NOT NULL,
+            previous_usd TEXT,
+            ceiling_usd  TEXT NOT NULL,
+            test         TEXT NOT NULL,
+            command      TEXT NOT NULL CHECK (command IN ('run', 'resume'))
+        )
+        """
+    )
+    conn.execute("ALTER TABLE tests ADD COLUMN paused_reason TEXT")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
+    m1_clips, m2_tests, m3_trials, m4_cost,
+]
 
 
 def _is_busy(err: BaseException) -> bool:

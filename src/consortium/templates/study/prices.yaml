@@ -1,7 +1,12 @@
 # Per-Model prices in USD per million tokens, as decimal strings (schema_version 1).
 # JSON Schema: docs/schema/prices.schema.json. The fake Model is free.
+# Cost of one attempt (core.cost, offline): input tokens = seconds of Clip media
+# (targets + Practice) x media_tokens_per_s + rendered request characters /
+# chars_per_token; output tokens = the Model's max_output_tokens.
 schema_version: 1
 models:
   m1:
     input_usd_per_mtok: "0"
     output_usd_per_mtok: "0"
+    media_tokens_per_s: "300"
+    chars_per_token: "4"

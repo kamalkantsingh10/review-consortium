@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,12 +24,13 @@ from consortium.board.blinding import append_conditions
 from consortium.board.clips import insert_clip
 from consortium.board.db import DB_FILE, connect, transaction
 from consortium.board.lease import LOCK_FILE, acquire_lease
+from consortium.board.ledger import Spend
 from consortium.board.writer import start_writer
 from consortium.cli import app
 from consortium.core.errors import ConsortiumError
 from consortium.core.render import ClipRef, canonical_json
 from consortium.core.seeds import derive_seed
-from consortium.engine.dispatch import _Prepared, dispatch
+from consortium.engine.dispatch import Budget, _Prepared, dispatch
 from consortium.raters.base import RaterResult
 from consortium.raters.fake import FakeRater, fake_answer
 from consortium.stages import personas as personas_stage
@@ -45,7 +47,8 @@ GODSPEED = {f"animacy_{i}": 3 for i in range(1, 7)} | {f"likeability_{i}": 3 for
 CONDITIONS = {"c_aaaaaaaa": {"gait": "smoothwalk"}, "c_bbbbbbbb": {"gait": "jerkystep"}}
 SOURCE_NAME = "secret_source_take3.mov"
 STEPS = ["begin_attempt", "append_request", "mark_sent", "set_handle", "append_response",
-         "set_state"]
+         "record_actual", "set_state"]
+FOOTER = "cost: committed 0 USD, ceiling none"
 TRIALS = 64 * (2 + 2)  # 64 Personas x 1 Model x 1 Repeat x (2 godspeed + 2 pairwise)
 
 
@@ -139,9 +142,9 @@ def test_happy_run(study: Path) -> None:
     assert result.exit_code == 0, result.stderr
     out = result.stdout.splitlines()
     assert out[0] == "test: pilot1 (pilot)"
-    assert out[-1] == f"states: valid {TRIALS}"
-    # The Run dispatched exactly the requests the dry run digested.
-    assert out[1:-1] == dry.stdout.splitlines()[1:]
+    assert out[-2:] == [f"states: valid {TRIALS}", FOOTER]
+    # The Run dispatched exactly the requests the dry run digested, at the same estimate.
+    assert out[1:-2] == dry.stdout.splitlines()[1:]
 
     trials = _trials(study)
     assert len(trials) == TRIALS
@@ -212,7 +215,9 @@ def test_declined_on_terminal(study: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert result.exit_code == 1
     assert f"Run {TRIALS} Trials on fake? [y/N]" in result.stderr
     assert "not_confirmed:" in result.stderr
-    assert "test:" not in result.stdout  # CliRunner echoes the typed answer to stdout
+    # The summary and cost estimate are printed before the question (story 1.9), no states.
+    assert "cost estimate: expected 0 USD, worst case 0 USD (max_retries 2)" in result.stdout
+    assert "states:" not in result.stdout
     _nothing_written(study)
 
 
@@ -237,7 +242,7 @@ def test_confirmed_on_terminal(study: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)
     result = _cli("pilot1", "--study", str(study), input="y\n")
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.splitlines()[-1] == f"states: valid {TRIALS}"
+    assert result.stdout.splitlines()[-2:] == [f"states: valid {TRIALS}", FOOTER]
 
 
 def test_no_tty_requires_confirmation(study: Path) -> None:
@@ -293,8 +298,10 @@ def test_main_refused(study: Path) -> None:
 def test_other_provider_unavailable(study: Path) -> None:
     cfg = study / "study.yaml"
     text = cfg.read_text()
+    fake = "      input_tokens: 0\n      output_tokens: 0\n"
+    text = text.replace(text[text.index("    fake:"):text.index(fake) + len(fake)], "")
     cfg.write_text(text.replace("provider: fake ", "provider: gemini ", 1))
-    result = _cli("pilot1", "--yes", "--study", str(study))
+    result = _cli("pilot1", "--yes", "--ceiling", "5", "--study", str(study))
     assert result.exit_code == 1
     assert result.stderr.startswith("provider_unavailable:")
     _nothing_written(study)
@@ -311,6 +318,9 @@ def test_dry_run_on_open_test(study: Path) -> None:
 
 def test_run_migrates_older_board(study: Path) -> None:
     raw = sqlite3.connect(study / DB_FILE, isolation_level=None)
+    raw.execute("DROP TABLE ledger")
+    raw.execute("DROP TABLE ceiling_changes")
+    raw.execute("ALTER TABLE tests DROP COLUMN paused_reason")
     raw.execute("DROP TABLE attempts")
     raw.execute("DROP TABLE trials")
     raw.execute("PRAGMA user_version = 2")
@@ -320,7 +330,7 @@ def test_run_migrates_older_board(study: Path) -> None:
     )
     result = _cli("pilot1", "--yes", "--study", str(study))
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.splitlines()[-1] == f"states: valid {TRIALS}"
+    assert result.stdout.splitlines()[-2:] == [f"states: valid {TRIALS}", FOOTER]
 
 
 def test_test_file_changed_after_confirmation(study: Path) -> None:
@@ -339,7 +349,8 @@ def test_test_file_changed_after_confirmation(study: Path) -> None:
 class _FailingRater(FakeRater):
     """Raises on the Nth ``submit`` call."""
 
-    def __init__(self, n: int = 5) -> None:
+    def __init__(self, n: int = 5, **usage: int) -> None:
+        super().__init__(**usage)
         self.n = n
         self.calls = 0
 
@@ -408,7 +419,7 @@ def test_failed_trials_warn_but_exit_zero(study: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(open_stage, "FakeRater", _ErrorRater)
     result = _cli("pilot1", "--yes", "--study", str(study))
     assert result.exit_code == 0, result.stderr
-    assert result.stdout.splitlines()[-1] == f"states: failed {TRIALS}"
+    assert result.stdout.splitlines()[-2:] == [f"states: failed {TRIALS}", FOOTER]
     assert result.stderr == f"warning: {TRIALS} Trials did not end valid\n"
 
 
@@ -454,7 +465,7 @@ def test_every_request_line_precedes_its_sent_write(study: Path) -> None:
             await writer.do("insert_plan",
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, {"m1": FakeRater()}, writer=writer, seed=1,
-                           concurrency=4)
+                           concurrency=4, budget=Budget.zero("pilot1"))
 
     asyncio.run(run())
     assert seen.count("mark_sent") == seen.count("set_state") == 20
@@ -502,7 +513,7 @@ def _run_engine(study: Path, rater: _CountingRater, concurrency: int) -> None:
             await writer.do("insert_plan",
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, {"m1": rater}, writer=writer, seed=1,
-                           concurrency=concurrency)
+                           concurrency=concurrency, budget=Budget.zero("pilot1"))
 
     asyncio.run(run())
 
@@ -541,7 +552,8 @@ def _engine(study: Path, rater, concurrency: int = 4, models: dict | None = None
             await writer.do("insert_plan",
                             lambda c: board_trials.insert_plan(c, "pilot1", plan.trials))
             await dispatch(study, pairs, models if models is not None else {"m1": rater},
-                           writer=writer, seed=1, concurrency=concurrency)
+                           writer=writer, seed=1, concurrency=concurrency,
+                           budget=Budget.zero("pilot1"))
 
     asyncio.run(run())
 
@@ -607,7 +619,7 @@ def test_terminal_states_never_change(study: Path) -> None:
         with pytest.raises(ValueError):
             board_trials.set_state(conn, trial_id, 1, "failed", "x")
         with pytest.raises(ValueError):
-            board_trials.begin_attempt(conn, trial_id, 1)
+            board_trials.begin_attempt(conn, trial_id, 1, Decimal(0), None, Spend())
         with pytest.raises(sqlite3.IntegrityError):  # (trial_id, attempt) recorded once
             conn.execute("INSERT INTO attempts (trial_id, attempt, seed) VALUES (?, 1, 0)",
                          (trial_id,))

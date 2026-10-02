@@ -2,10 +2,25 @@
   "$defs": {
     "ModelPrice": {
       "additionalProperties": false,
+      "description": "Prices in USD per million tokens plus the token formula of ``core.cost`` (story 1.9).",
       "properties": {
+        "chars_per_token": {
+          "default": "4",
+          "description": "Characters of rendered request text per input token.",
+          "pattern": "^(?=.*[1-9])[0-9]+(\\.[0-9]+)?$",
+          "title": "Chars Per Token",
+          "type": "string"
+        },
         "input_usd_per_mtok": {
           "pattern": "^[0-9]+(\\.[0-9]+)?$",
           "title": "Input Usd Per Mtok",
+          "type": "string"
+        },
+        "media_tokens_per_s": {
+          "default": "300",
+          "description": "Input tokens per second of Clip media.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "title": "Media Tokens Per S",
           "type": "string"
         },
         "output_usd_per_mtok": {

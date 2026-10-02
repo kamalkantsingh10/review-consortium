@@ -1,4 +1,4 @@
-"""SQL for the ``trials`` and ``attempts`` tables (m3).
+"""SQL for the ``trials`` and ``attempts`` tables (m3); ``begin_attempt`` also reserves (m4).
 
 Inside a dispatching command these helpers run only on the writer task
 (``board.writer``), which owns the connection.
@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from decimal import Decimal
 
 from consortium.board.db import transaction
+from consortium.board.ledger import Spend, reserve
 from consortium.core.clock import utc_now_ms
 from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Trial
@@ -122,23 +124,37 @@ def attempt_seeds(conn: sqlite3.Connection, test: str) -> dict[tuple[str, int], 
     }
 
 
-def begin_attempt(conn: sqlite3.Connection, trial_id: str, study_seed: int) -> tuple[int, int]:
-    """Increment the Trial's ``attempt`` and record the new attempt row, in one transaction.
+def begin_attempt(
+    conn: sqlite3.Connection,
+    trial_id: str,
+    study_seed: int,
+    usd: Decimal,
+    ceiling: Decimal | None,
+    spend: Spend,
+) -> tuple[int, int] | None:
+    """Reserve ``usd`` and start the Trial's next attempt, atomically (one transaction).
 
-    The attempt's seed is ``derive_seed(study_seed, "model",
-    "<session_id>:<trial_index>:<attempt>")``. Returns ``(attempt, seed)``.
-    Refuses a Trial in a terminal state.
+    If ``ceiling`` is set and committed spend (``spend``, the writer's running
+    total) plus ``usd`` exceeds it, the reservation is refused: nothing is written and
+    ``None`` is returned. Otherwise ``attempt`` is incremented, the attempt row
+    is recorded with its seed (``derive_seed(study_seed, "model",
+    "<session_id>:<trial_index>:<attempt>")``) and the ledger row with
+    ``reserved_usd = usd``; returns ``(attempt, seed)``. Refuses a Trial in a
+    terminal state.
     """
     with transaction(conn):
         row = conn.execute(
-            "SELECT session_id, trial_index, state, attempt FROM trials WHERE trial_id = ?",
+            "SELECT session_id, trial_index, state, attempt, model_id FROM trials"
+            " WHERE trial_id = ?",
             (trial_id,),
         ).fetchone()
         if row is None:
             raise KeyError(trial_id)
-        session_id, trial_index, state, attempt = row
+        session_id, trial_index, state, attempt, model_id = row
         if state in TERMINAL_STATES:
             raise ValueError(f"Trial {trial_id} is {state}; terminal states never change")
+        if ceiling is not None and spend.committed(conn) + usd > ceiling:
+            return None
         attempt += 1
         seed = derive_seed(study_seed, MODEL_PURPOSE, f"{session_id}:{trial_index}:{attempt}")
         conn.execute("UPDATE trials SET attempt = ? WHERE trial_id = ?", (attempt, trial_id))
@@ -146,6 +162,8 @@ def begin_attempt(conn: sqlite3.Connection, trial_id: str, study_seed: int) -> t
             "INSERT INTO attempts (trial_id, attempt, seed) VALUES (?, ?, ?)",
             (trial_id, attempt, seed),
         )
+        reserve(conn, trial_id, attempt, model_id, usd)
+    spend.add(conn, usd)
     return attempt, seed
 
 

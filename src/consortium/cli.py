@@ -13,7 +13,7 @@ from typer.core import TyperGroup
 from consortium.core.errors import ConsortiumError
 from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
-from consortium.stages.open import open_test
+from consortium.stages.open import open_test, usd
 from consortium.stages.push import push_clip, push_test
 
 
@@ -139,11 +139,12 @@ def open_cmd(
     ] = False,
     study: StudyOption = Path("."),
 ) -> None:
-    """Plan, render and run TEST's Trials (--dry-run: print counts, change nothing;
-    --resume: continue a stopped Run without re-sending completed Trials)."""
+    """Plan, render and run TEST's Trials (--dry-run: print counts and the cost estimate,
+    change nothing; --resume: continue a stopped or paused Run without re-sending completed
+    Trials; --ceiling: set the Study's cost ceiling in USD)."""
     announced: list[str] = []
 
-    def announce(lines: list[str]) -> None:  # printed before dispatch starts
+    def announce(lines: list[str]) -> None:  # printed before confirmation and dispatch
         for line in lines:
             typer.echo(line)
         announced.extend(lines)
@@ -152,7 +153,29 @@ def open_cmd(
         study, test, dry_run=dry_run, yes=yes, ceiling=ceiling, resume=resume,
         confirm=_confirm, announce=announce,
     )
-    for line in summary.lines()[len(announced):]:
-        typer.echo(line)
+    pending = list(announced)
+    for line in summary.lines():
+        if line in pending:
+            pending.remove(line)
+        else:
+            typer.echo(line)
+    if summary.dry_run:
+        return
+    if (
+        summary.ceiling is not None
+        and summary.committed is not None
+        and summary.committed > summary.ceiling
+    ):
+        typer.echo(
+            f"ceiling_overshoot: committed {usd(summary.committed)} > ceiling "
+            f"{usd(summary.ceiling)} (actual cost exceeded the estimate)",
+            err=True,
+        )
     if summary.not_valid:
         typer.echo(f"warning: {summary.not_valid} Trials did not end valid", err=True)
+    if summary.paused == "ceiling":
+        raise ConsortiumError(
+            "ceiling_reached",
+            f"Run paused at the ceiling; continue with "
+            f"`consortium open {test} --resume --ceiling <higher USD>`",
+        )

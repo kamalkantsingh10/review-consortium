@@ -131,6 +131,9 @@ def test_dry_run_counts_and_writes_nothing(study: Path) -> None:
         "by instrument: godspeed 768, pairwise_alive 2304",
         "by type: single 768, pairwise 2304",
         f"requests sha256: {_digest(study)}",
+        "cost estimate: expected 0 USD, worst case 0 USD (max_retries 2)",
+        "cost covers: 3072 Trials; Clips go to: fake",
+        "ceiling: none, committed before: 0 USD",
     ]
     assert _snapshot(study) == before
     assert not (study / f"{DB_FILE}-wal").exists() and not (study / f"{DB_FILE}-shm").exists()
@@ -258,7 +261,7 @@ def test_media_limits_tightened_after_push(fresh: Path) -> None:
 def test_bad_ceiling(study: Path, ceiling: str) -> None:
     result = _cli("pilot1", "--dry-run", "--ceiling", ceiling, "--study", str(study))
     assert result.exit_code == 1
-    assert result.stderr.startswith("bad_ceiling:")
+    assert result.stderr.startswith("invalid_ceiling:")
 
 
 def test_good_ceiling_accepted(study: Path) -> None:
