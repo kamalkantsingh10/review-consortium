@@ -60,7 +60,7 @@ development_status:
   epic-3: in-progress
   3-1-persona-fidelity-screening: done
   3-2-perception-screening: done
-  3-3-eligibility-gate-and-invalidation: backlog
+  3-3-eligibility-gate-and-invalidation: done
   3-4-copy-a-panel-into-a-new-study: backlog
   epic-3-retrospective: optional
 

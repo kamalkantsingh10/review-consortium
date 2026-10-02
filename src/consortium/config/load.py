@@ -406,7 +406,9 @@ def _not_allowed(rel: str, i: int, name: str) -> ConsortiumError:
     )
 
 
-def load_fidelity_instruments(study_dir: Path | str, cfg: StudyConfig) -> list[InstrumentDef]:
+def load_fidelity_instruments(
+    study_dir: Path | str, cfg: StudyConfig, *, warn_draft: bool = True
+) -> list[InstrumentDef]:
     """The Persona-fidelity Instruments (story 3.1): BFI-10, then the NARS Instrument
     selected by ``screening.nars_instrument`` when the frame has NARS bands.
 
@@ -414,7 +416,8 @@ def load_fidelity_instruments(study_dir: Path | str, cfg: StudyConfig) -> list[I
     ``study.yaml`` ``instruments``. The NARS Instrument must be ``self_report`` with every
     key of construct ``nars`` and at least one of the subscales s1, s2, s3 keyed
     (``config_invalid``, field ``screening.nars_instrument``; ``unknown_instrument`` when
-    it does not resolve). Logs ``draft_instrument: <name>`` for a draft one.
+    it does not resolve). Logs ``draft_instrument: <name>`` for a draft one unless
+    ``warn_draft`` is false (``open`` only needs the fidelity stamp, story 3.3).
     """
     study = Path(study_dir)
     _check_no_shadowing(study)
@@ -445,7 +448,7 @@ def load_fidelity_instruments(study_dir: Path | str, cfg: StudyConfig) -> list[I
     for instrument in out:
         if not instrument.self_report:  # a built-in edited into an invalid state
             raise _invalid(STUDY_FILE, f"{instrument.name!r} is not a self_report Instrument")
-        if instrument.draft:
+        if instrument.draft and warn_draft:
             log.warning("draft_instrument: %s", instrument.name)
     return out
 

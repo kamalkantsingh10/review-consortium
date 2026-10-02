@@ -580,10 +580,12 @@ def test_concurrent_dispatcher_is_study_busy(study: Path) -> None:
 
 def test_pilot_export_has_no_screening_row(study: Path) -> None:
     _pilot(study)
-    assert _cli("scr", "--yes", "--study", str(study)).exit_code == 0
-    personas_stage.generate(study)  # perception (p0) Trials do not freeze the Panel
+    personas_stage.generate(study)
+    # Opened before any screening run (story 3.3: an unscreened pilot runs ungated; once a
+    # screening run exists the pilot would be gated, and nothing screens presence here).
     opened = runner.invoke(app, ["open", "pilot1", "--yes", "--study", str(study)])
     assert opened.exit_code == 0, opened.stderr
+    assert _cli("scr", "--yes", "--study", str(study)).exit_code == 0
     exported = runner.invoke(app, ["export", "pilot1", "--study", str(study)])
     assert exported.exit_code == 0, exported.stderr
     with (study / "exports" / "pilot1.csv").open(newline="") as fh:

@@ -151,7 +151,16 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or spent, it prints the counts of what a Run would send plus a digest of every request, and writes nothing. Without `--dry-run` it **runs** the Test (see [Run](#run)): every Trial is sent once through its Model's Rater. In this version only the `fake` provider has an adapter. `--ceiling USD` sets the Study's cost ceiling (a decimal amount greater than 0, for example `5.00`, else `invalid_ceiling`; see [Cost and ceiling](#cost-and-ceiling)). Without `--dry-run`, `--resume` continues a stopped Run (see [Resume](#resume)); with `--dry-run` it is ignored.
 
 - `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
-- **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); any `kind: screening` registration (a user screening Test or a screening run `s<n>`) is refused with `screening_test_not_openable` (story 3.2), before the next check; a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card).
+- **Reads and checks, in order:** `--ceiling`; `study.yaml`; the Test's registration and its Clips' rows in `board.db` (opened read-only); any `kind: screening` registration (a user screening Test or a screening run `s<n>`) is refused with `screening_test_not_openable` (story 3.2), before the next check; a `kind: main` Test is refused here with `protocol_lock_unavailable`, before anything is planned (as is any other Test registered not openable: `Test '<name>' is registered as not openable`); the registered `tests/<name>.yaml` (its bytes must still match the registered SHA-256, else `test_exists`; if they change while it is validated, `test_changed`), validated as by `push test`'s schema step; then `push test`'s plan, Practice, Clip-reference and media-limit checks are run again against the current config (`bad_pairing`, `bad_practice`, `unknown_clip`, `media_limit_exceeded`, `unknown_instrument`), since `study.yaml` or an Instrument may have changed since the push; the Persona Panel (`panel/personas/index.json` and every `p<n>.md` card); then the **eligibility gate** (below).
+- **Eligibility gate** (story 3.3). Which Tests are gated: a `kind: main` Test always (the gate runs after the `protocol_lock_unavailable` refusal, so it applies once Epic 4 makes main Tests openable); a `kind: pilot` Test once `board.db` holds a **complete** screening run (open or abandoned runs do not count). Before the first complete screening run a pilot runs **ungated**: its summary shows `screening: none` and stderr shows `unscreened_pilot: Test <t> runs without screening` once every refusal checked before confirmation has passed: just before the confirmation prompt (with `--yes`, once the lease is taken, just before dispatch; a dry run: once it returns), so a refusal is always the first stderr line. Screening Tests are never opened. For a gated Test, `core.eligibility.eligible` judges every Agent of the Test against the result rows of **every complete screening run** (`board.screening.complete_results`, superseded runs included). A row **counts** only while its `settings_hash` equals the Model's current `settings_hash` and its `instrument_hash` the current one (perception: `core.hashes.instrument_hash` of the Instrument's current definition; fidelity: the fidelity stamp `core.hashes.fidelity_hash` of the current fidelity Instruments and card wording); per key the **latest counting row** (highest run number) decides, so a newer stale row never hides an older counting one; a key whose rows are all stale is **stale**. Only the Test's Models and Instruments are judged; `self_report` Instruments are left out of the coverage and perception checks:
+  - **Coverage** (Story 3.2's rule, `core.perception.covered_instruments` and `coverage`): every Test Instrument needs a counting perception row with `pair_checks > 0`, of any Model (stale rows never cover); else `screening_coverage_missing`, naming the Instruments.
+  - **Perception**: a Model needs a counting `pass` for every Test Instrument. A counting `fail` excludes all its Agents with `perception_fail` (its stale keys and its Agents' fidelity rows are then ignored), no row with `perception_missing`. A Model with one failed Instrument is dropped from the whole Test, so every Session keeps the same shape.
+  - **Fidelity**: an Agent needs a counting `pass` on its `fidelity` row, else it is excluded with `fidelity_fail` or `fidelity_missing`.
+  - **Stale**: a needed key whose rows are all stale is `screening_stale` (unless its Model is already excluded by a counting perception `fail`); `open` refuses rather than excluding, naming each Model (settings changed) or Instrument (definition changed) and the command to re-run (`consortium screen personas`, `consortium screen models <TEST>`).
+  - **Empty plan**: no eligible Agent is `no_eligible_agents`, with the reason counts.
+  - **Check order**: coverage, then stale, then empty. For a pilot, each of these refusals adds `(pilots are gated once a screening run exists: <run ids>)`. Each excluded Agent has **one** reason, by precedence `perception_fail` > `screening_stale` > `perception_missing` > `fidelity_*`, so the counts sum to the excluded Agents.
+
+  Only the eligible Agents are planned (`core.plan.plan_test(agents=...)`); seeds come from the Session ID, so an eligible Agent's Trials and requests are byte-identical to the ungated plan, and with every Agent eligible `requests sha256` equals the ungated digest. The dry run and the Run gate identically.
 - **Plans** every Session and Trial (see [Sessions and Trials](#sessions-and-trials)) and **renders every request** (see [Trial requests](#trial-requests)), one at a time, so a broken Instrument, card or missing Clip fails here rather than mid-Run. `requests sha256` is the SHA-256 of the canonical JSON of every request concatenated in plan order (Sessions in order, Trials by `trial_index`); the same seed and inputs give the same digest in any folder.
 - **Estimates the cost** of every planned Trial with the one offline cost formula (see [Cost and ceiling](#cost-and-ceiling)); nothing is sent to a provider for token counts or prices.
 - **A dry run writes no Study data.** `board.db` is opened read-only (SQLite `mode=ro`; when no `board.db-wal` exists, also `immutable=1`, so no `board.db-wal` or `board.db-shm` is created; if a writer starts during the reads, they are redone with plain `mode=ro`). Normally no file in the Study folder is created, changed or touched (bytes and modification times are unchanged). One exception: a stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, SQLite's own side file, which holds no Study data. No Trial is stored, no provider is contacted and no ceiling is logged (a `--ceiling` given with `--dry-run` is only shown).
@@ -165,17 +174,30 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
   by model: m1 3072
   by instrument: godspeed 768, pairwise_alive 2304
   by type: single 768, pairwise 2304
+  screening: none
   requests sha256: <64 lowercase hex digits>
   cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2, transient_retries 3)
   cost covers: 3072 Trials; Clips go to: fake
   ceiling: none, committed before: 0 USD
   ```
 
-  Models are listed in the Test's order, Instruments in the Test's order; `by type` counts single-Clip and pairwise Trials.
+  Models are listed in the Test's order, Instruments in the Test's order; `by type` counts single-Clip and pairwise Trials. `screening: none` is an ungated pilot (story 3.3). A gated Test prints three lines after `by type` instead (the Run's summary shows the same lines):
+
+  ```text
+  screening: fidelity s3, perception s4
+  eligible agents: 58 of 128
+  excluded: perception_fail 64 (m2: pairwise_alive), fidelity_fail 4, fidelity_missing 2
+  ```
+
+  `screening:` lists the runs whose results decided (several joined with `+`, `none` if none); `eligible agents: E of A` counts Agents (Persona x Model) of the Test; `excluded:` gives the count per reason in precedence order (`none` when nothing is excluded) and, for a perception reason, the Instruments behind it per Model.
 
 | Situation | Result |
 | --- | --- |
 | Registered pilot Test, `--dry-run` | Counts and requests digest printed, exit `0`, Study folder unchanged |
+| Pilot Test, no complete screening run yet | Ungated plan (digest as before story 3.3), `screening: none`, `unscreened_pilot` on stderr |
+| Gated Test, an Instrument has no current perception result with pair checks | `screening_coverage_missing`, exit `1`, nothing planned |
+| Gated Test, a needed result is stale (a Model's settings or an Instrument changed since screening) | `screening_stale`, exit `1`, nothing planned |
+| Gated Test, every Agent excluded | `no_eligible_agents`, exit `1`, nothing written |
 | Registered `kind: screening` Test or screening run `s<n>` (with or without `--dry-run`) | `screening_test_not_openable`, exit `1`, nothing planned (run it with `consortium screen models TEST`) |
 | `kind: main` Test | `protocol_lock_unavailable`, exit `1`, nothing planned (until the Protocol lock, Epic 4) |
 | `TEST` not registered, or no `board.db` | `unknown_test`, exit `1` |
@@ -331,6 +353,8 @@ The worst-case cost estimate is `expected × (1 + max_retries + transient_retrie
 | `kind: main` Test | `protocol_lock_unavailable`, exit `1`; nothing written |
 | A Model of the Test uses a provider other than `fake` | `ceiling_required` without a ceiling; then `api_key_missing` (gemini or qwen, key env var unset or empty); exit `1`; nothing written or uploaded |
 
+**Eligibility under the lease** (story 3.3). A Run re-gates under the lease after the confirmation; a different decision (another set of eligible Agents, exclusions, stamps or deciding screening runs), or a gate refusal there, is `test_changed`, nothing written. The `insert_plan` transaction that stores the Trials also writes, for a gated Test, one `screening_exclusions` row per excluded Agent and the `screening_stamps` rows (see [`board.db`](#boarddb)); an ungated pilot writes neither.
+
 #### Resume
 
 `open TEST --resume` continues a stopped Run (killed, crashed or failed) at Trial level, through the same engine. It never re-plans and never re-orders: every stored Trial is **re-rendered** from its `board.db` row plus the current Study folder (Persona card, Instrument, Practice examples, Clip hashes), which also proves the Archive can re-issue its requests. In order:
@@ -347,7 +371,7 @@ The worst-case cost estimate is `expected × (1 + max_retries + transient_retrie
 
    `requests sha256` is over every stored Trial's re-rendered request in plan order, so it equals the Run's (and the dry run's) digest when nothing changed. When every Trial is terminal there is nothing to confirm.
 5. Takes the `board.lock` lease (`study_busy` if another dispatcher holds it, nothing written; a killed Run never blocks, since the OS releases its lock). Under the lease it re-checks the Test has Trials (`test_not_open`) and that the Test file's bytes (hashed again), the requests digest, the non-terminal Trials (state, attempt, handle), the cost estimate and the providers are unchanged since the confirmation (else `test_changed`, nothing written).
-6. Runs the **re-issue check** (below); a mismatch is `reissue_mismatch`, nothing written.
+6. Runs the **re-issue check** (below); a mismatch is `reissue_mismatch`, nothing written. Then the **eligibility freeze** (story 3.3), also checked before the confirmation (step 4): a resume never re-gates and never adds exclusions; for a gated Test (one with `screening_stamps` rows), the `settings_hash` of each Model, the `instrument_hash` of each Instrument and the fidelity stamp of the Trials it will send (non-terminal and not settled from the board) must still equal the stamps recorded at open, else `screening_stale` (naming them; a Model or Instrument no longer in the Study is named too), nothing written. The summary shows `screening: frozen at open (<n> Agent(s) excluded)`, or `screening: none` for an ungated Test.
 7. Prints `resume: collect C, new attempt A, settled S, terminal T, archive fragments F` (S = Trials settled from the board without dispatch, see [Response validation and retries](#response-validation-and-retries); F = crash fragments skipped in the two Archive files), settles those Trials, logs `--ceiling` if given, then sends the non-terminal Trials through the engine (each new attempt reserves as in a Run; a collected attempt was reserved when it was sent):
    - terminal (`valid`, `invalid`, `refused`, `failed`): untouched, never re-sent;
    - settled (latest attempt recorded valid: `valid`; a spent budget or the `1 + max_retries + transient_retries` cap: `invalid` or `failed`): its state is written, nothing is sent or collected;
@@ -647,6 +671,9 @@ Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@
 | `screening_test_not_openable` | `open` | The name is a `kind: screening` Test (run it with `screen models`) or a screening run `s<n>` (run and resumed by `screen personas` or `screen models`). |
 | `not_a_screening_test` | `screen models` | The Test is not a registered `kind: screening` Test (a pilot or main Test, or a screening run `s<n>`). Nothing was written. |
 | `no_screening_checks` | `screen models` | The screening Test declares no `checks`. Nothing was written. |
+| `screening_coverage_missing` | `open` | A gated Test (story 3.3) uses an Instrument (not `self_report`) with no counting perception result with `pair_checks > 0` (any Model; stale results never cover); add pair checks for it to a screening Test and run `screen models`. Nothing planned. For a pilot the message names the complete screening runs that gate it. |
+| `screening_stale` | `open`, `open --resume` | A needed screening result was stamped with other Model settings or another Instrument definition (or fidelity Instruments / card wording) than the current ones; re-run `screen personas` / `screen models`. On resume: the Models or Instruments of the open Trials no longer match the stamps recorded at open (a resume never re-gates). Nothing written. |
+| `no_eligible_agents` | `open` | The eligibility gate excluded every Agent of the Test; the message gives the reason counts. Nothing written. |
 | `draft_instrument_not_allowed` | `screen personas` | A fidelity Instrument in use is `draft: true` (the placeholder `fidelity_nars`) and a Model is not `provider: fake`; select a filled-in NARS Instrument (see [NARS Instrument](#nars-instrument)). |
 | `panel_frame_mismatch` | `screen personas` | `study.yaml` `personas.nars_bands` and the Panel disagree on whether Personas have a NARS band. |
 | `bad_option` | `screen personas`, `screen models` | `--resume`, `--dry-run` and `--abandon` (`screen models`: `--resume` and `--abandon`) were combined. |
@@ -663,6 +690,7 @@ Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@
 | `invalid_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0; nothing changed. |
 | `ceiling_required` | `open`, `screen personas` | No cost ceiling has ever been set and none was given, and a Model the open sends to is not `provider: fake` priced `0`; nothing was sent. |
 | `over_ceiling` | `open`, `screen personas` | Committed spend plus the Run's expected cost exceeds the ceiling (`[committed C + ]expected X > ceiling Y`), or `--ceiling` is below committed spend (`committed C > ceiling Y`); nothing was sent or logged. |
+| `unscreened_pilot` | `open` (stderr warning) | A pilot Test was opened (dry run or Run) before any complete screening run exists, so it runs ungated (story 3.3): `unscreened_pilot: Test <t> runs without screening`, printed once every refusal checked before confirmation has passed (just before the prompt, or with `--yes` just before dispatch). From the first complete screening run on, pilots are gated. |
 | `ceiling_overshoot` | `open` (stderr warning) | An attempt's actual cost exceeded its estimate and pushed committed spend over the ceiling; the Run paused. |
 | `ceiling_reached` | `open`, `open --resume`, `screen personas` | The Run paused because the next attempt's reservation would cross the ceiling; in-flight attempts were collected. Continue with `--resume --ceiling <higher>`. |
 | `unknown_prompt_variant` | `open` | A Trial's Prompt variant is not defined by its Instrument (an internal consistency check). |
@@ -738,7 +766,7 @@ One canonical MP4 per Clip, written by `push clip`. The file name is the Clip ID
 
 ### `board.db`
 
-SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `6`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
+SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `7`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
 
 | Column | Meaning |
 | --- | --- |
@@ -777,6 +805,10 @@ Table `ceiling_changes` (version 4), one row per `open --ceiling`: `ts` (UTC ISO
 Table `screening_runs` (version 6, story 3.1), one row per screening run: `run_id` (primary key, `s<n>`), `kind` (`fidelity` or `perception`), `screening_test` (the screening Test of a perception run; empty for fidelity), `started_at` (UTC ISO 8601 with milliseconds and `Z`), `status` (`open` until scored, then `complete`; `abandoned` by `--abandon`, never scored), `superseded_by` (the newer complete run once every result key of this run is covered by later complete runs; empty otherwise), `settings_hashes` (canonical JSON `{model_id: settings_hash}`) and `instrument_hash` (the stamps recorded when the run was created). A run's Trials belong to the `tests` row named `s<n>` (kind `screening`, not openable).
 
 Table `screening_results` (version 6), one row per result, only ever inserted: `run_id`, `model_id`, `agent_id` (the Agent of a fidelity row), `instrument` (`fidelity` for fidelity rows), `outcome` (`pass` or `fail`), `score` (the match ratio), `threshold` (`thresholds.persona_fidelity_min` when scored), `settings_hash`, `instrument_hash` (see [`screen personas`](#consortium-screen-personas---yes---ceiling-usd---resume---dry-run---abandon---study-path)), `detail` (canonical JSON: per construct its `score`, `midpoint`, `pole`, `match`, `n`, `expected` and `insufficient_data`, plus NARS `subscales`; `matched`, `total`, `insufficient_data`, `draft`), `pair_checks` (perception, story 3.2), `source_study` and `source_hash` (a copied Panel, story 3.4). At most one row per `(run_id, instrument, model_id, agent_id)` (unique). The current result of each `(instrument, model_id, agent_id)` is the one from the highest-numbered complete run that has it.
+
+Table `screening_exclusions` (version 7, story 3.3), one row per Agent the eligibility gate excluded when a gated Test was opened (written with its Trials; primary key `(test, agent_id)`): `test`, `agent_id`, `persona_id`, `model_id`, `instrument` (the Instrument behind a perception reason; NULL for fidelity reasons) and `reason` (`perception_fail`, `perception_missing`, `fidelity_fail` or `fidelity_missing`; one per Agent, by that precedence; a stale result refuses the open, so `screening_stale` is never stored). Epic 4's Rater-flow report reads it.
+
+Table `screening_stamps` (version 7, story 3.3), one row per planned `(model_id, instrument)` of a gated Test, plus one per planned Model with `instrument` `fidelity` (primary key `(test, model_id, instrument)`): `test`, `model_id`, `instrument`, `settings_hash`, `instrument_hash` (the stamps the gate checked; for `fidelity`, the fidelity stamp `core.hashes.fidelity_hash`) and `runs` (canonical JSON list of the screening run IDs whose results decided that key). A resume must still match the stamps. An ungated pilot has no rows in either table.
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 

@@ -153,16 +153,33 @@ def open_cmd(
     change nothing; --resume: continue a stopped or paused Run without re-sending completed
     Trials; --ceiling: set the Study's cost ceiling in USD)."""
     announced: list[str] = []
+    # Warnings (unscreened_pilot) are held until the command gets past its refusals: shown
+    # just before the confirmation prompt, else with the summary under the lease (--yes),
+    # so a refusal is always the first stderr line.
+    warnings: list[str] = []
+
+    def flush() -> None:
+        for line in warnings:
+            typer.echo(line, err=True)
+        warnings.clear()
 
     def announce(lines: list[str]) -> None:  # printed before confirmation and dispatch
+        if announced:
+            flush()  # the second announcement comes under the lease, before dispatch
         for line in lines:
             typer.echo(line)
         announced.extend(lines)
 
+    def confirm(prompt: str) -> bool:
+        if _stdin_is_tty():
+            flush()
+        return _confirm(prompt)
+
     summary = open_test(
         study, test, dry_run=dry_run, yes=yes, ceiling=ceiling, resume=resume,
-        confirm=_confirm, announce=announce,
+        confirm=confirm, announce=announce, warn=warnings.append,
     )
+    flush()
     pending = list(announced)
     for line in summary.lines():
         if line in pending:

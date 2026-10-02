@@ -11,10 +11,16 @@ caps), the planned Trials of a fresh Run, and hooks:
 - ``reload(changed)``: re-reads everything under the lease (raising ``changed``
   when a registered input was edited), so the confirmed requests, providers,
   estimate and fingerprint can be compared (``test_changed``);
-- ``resume_check(conn)``: called under the lease before a resume dispatches
-  (no-op by default);
+- ``resume_check(conn)``: called before a resume's confirmation and again under the
+  lease before it dispatches (no-op by default);
+- ``before_confirm()``: called once a fresh Run passed every refusal checked before
+  confirmation, just before the prompt (``open``'s ``unscreened_pilot`` warning);
 - ``finish(conn)``: called on the writer once dispatch returns (screening scores
   its results there); its result is ``OpenSummary.finished``.
+
+``Prepared.screening`` holds lines a stage adds to a Run's, resume's or dry run's summary,
+after ``by type`` (``open``'s eligibility gate, story 3.3; the gate itself lives in the
+stage, never here).
 
 A Run refuses a Test that already has Trials, asks for confirmation (unless
 ``yes``) showing the Trial count and requests digest, then takes the
@@ -147,6 +153,7 @@ class OpenSummary:
     paused: str | None = None  # "ceiling" when the Run paused (or, dry run, is paused)
     would_refuse: str | None = None  # dry run: the ceiling refusal a Run would raise
     finished: Any = None  # what ``Prepared.finish`` returned (None when there is no hook)
+    screening: tuple[str, ...] = ()  # the stage's screening lines (story 3.3), after by type
 
     @property
     def not_valid(self) -> int:
@@ -173,6 +180,7 @@ class OpenSummary:
             f"by model: {fmt(self.by_model)}",
             f"by instrument: {fmt(self.by_instrument)}",
             f"by type: {fmt(self.by_type)}",
+            *self.screening,
             f"requests sha256: {self.requests_sha256}",
             *self.cost_lines(),
             *([f"resume: {fmt(self.resumed)}"] if self.resumed is not None else []),
@@ -406,6 +414,8 @@ class Prepared:
     guard: Callable[[], None] = _nothing
     resume_check: Callable[[sqlite3.Connection], None] = _nothing
     finish: Callable[[sqlite3.Connection], object] | None = None
+    screening: tuple[str, ...] = ()  # summary lines after ``by type`` (story 3.3)
+    before_confirm: Callable[[], None] = _nothing  # once every refusal passed (fresh Run)
 
     @property
     def kind(self) -> str:
@@ -622,6 +632,11 @@ def prepare_test(study: Path, test: str, reader: ConfigReader, *, plan: bool) ->
     )
 
 
+def refuse_if_open(study: Path, test: str) -> None:
+    """``test_already_open`` when ``test`` has Trials (a fresh Run's ``guard``)."""
+    _refuse_if_open(study, test)
+
+
 def _refuse_if_open(study: Path, test: str) -> None:
     found = read_only(study, lambda conn: (count_trials(conn, test), paused_reason(conn, test)))
     if found and found[0]:
@@ -740,7 +755,8 @@ def dry_run(study: Path, prepared: Prepared, new_ceiling: Decimal | None) -> Ope
     return dataclasses.replace(
         _summarize(plan, ctx.instrument_order, True, digest.hexdigest()),
         estimate=estimate, ceiling=dry_ceiling, committed_before=committed,
-        would_refuse=would_refuse, paused=read_only(study, lambda c: paused_reason(c, test)),
+        would_refuse=would_refuse, screening=prepared.screening,
+        paused=read_only(study, lambda c: paused_reason(c, test)),
     )
 
 
@@ -784,12 +800,14 @@ def run(
     shown = dataclasses.replace(
         _summarize(plan, instrument_order, False, digest),
         estimate=estimate, ceiling=ceiling, committed_before=committed,
+        screening=prepared.screening,
     ).lines()
     if announce is not None:
         announce(shown)
     _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
                      estimate.expected, fresh=True)
     raters(cfg, model_ids, study)  # provider/key errors before confirmation
+    prepared.before_confirm()
     if not yes:
         if confirm is None:
             raise ConsortiumError(
@@ -827,6 +845,7 @@ def run(
         summary = dataclasses.replace(
             _summarize(plan, instrument_order, False, digest),
             estimate=estimate, ceiling=ceiling, committed_before=committed,
+            screening=prepared.screening,
         )
         if announce is not None:
             announce([line for line in summary.lines() if line not in shown])
@@ -1041,12 +1060,15 @@ def resume(
     shown = dataclasses.replace(
         _summarize_trials(test, ctx.kind, res.trials, ctx.instrument_order, False, res.digest),
         estimate=estimate, ceiling=ceiling, committed_before=committed,
+        screening=prepared.screening,
     ).lines()
     if announce is not None:
         announce(shown)
     _enforce_ceiling(ceiling, committed, new_ceiling, ctx.uncapped_ok(model_ids),
                      estimate.expected, fresh=False)
     raters(ctx.cfg, model_ids, study)  # provider/key errors before confirmation
+    if prepared.resume_check is not _nothing:  # again under the lease
+        read_only(study, prepared.resume_check)
     if res.todo and not yes:
         if confirm is None:
             raise ConsortiumError(
@@ -1098,6 +1120,7 @@ def resume(
             ),
             resumed={**res_now.counts(), "archive fragments": fragments},
             estimate=estimate, ceiling=ceiling, committed_before=committed,
+            screening=now.screening,
         )
         if announce is not None:
             announce([line for line in summary.lines() if line not in shown])

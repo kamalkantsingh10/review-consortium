@@ -206,8 +206,50 @@ def m6_screening(conn: sqlite3.Connection) -> None:
     )
 
 
+def m7_screening_gate(conn: sqlite3.Connection) -> None:
+    """Story 3.3: what the eligibility gate decided when a gated Test was opened.
+
+    ``screening_exclusions``: one row per excluded Agent with its one reason code
+    (``fidelity_fail``, ``fidelity_missing``, ``perception_fail``, ``perception_missing``;
+    a stale result refuses the open, so it is never stored) and, for a perception reason,
+    the Instrument (NULL for fidelity reasons). Epic 4's Rater-flow report reads it.
+    ``screening_stamps``: one row per planned ``(model_id, instrument)``, plus one per
+    planned Model with ``instrument = 'fidelity'`` (the fidelity stamp), holding the
+    stamps the gate checked and ``runs`` (canonical JSON list of the screening run IDs
+    whose results decided); a resume of the Test must still match the stamps. Both are
+    written in the Test's ``insert_plan`` transaction.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screening_exclusions (
+            test       TEXT NOT NULL REFERENCES tests(name),
+            agent_id   TEXT NOT NULL,
+            persona_id TEXT NOT NULL,
+            model_id   TEXT NOT NULL,
+            instrument TEXT,
+            reason     TEXT NOT NULL CHECK (reason IN ('fidelity_fail', 'fidelity_missing',
+                           'perception_fail', 'perception_missing')),
+            PRIMARY KEY (test, agent_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screening_stamps (
+            test            TEXT NOT NULL REFERENCES tests(name),
+            model_id        TEXT NOT NULL,
+            instrument      TEXT NOT NULL,
+            settings_hash   TEXT NOT NULL,
+            instrument_hash TEXT NOT NULL,
+            runs            TEXT NOT NULL,
+            PRIMARY KEY (test, model_id, instrument)
+        )
+        """
+    )
+
+
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
-    m1_clips, m2_tests, m3_trials, m4_cost, m5_validation, m6_screening,
+    m1_clips, m2_tests, m3_trials, m4_cost, m5_validation, m6_screening, m7_screening_gate,
 ]
 
 

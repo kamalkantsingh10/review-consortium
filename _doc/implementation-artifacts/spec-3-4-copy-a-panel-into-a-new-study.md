@@ -72,6 +72,14 @@ context:
 
 ## Code Map
 
+- **As built by Stories 3.1–3.2; reuse these, don't redo them:**
+  - Coverage is `core.perception.covered_instruments(results, instrument_hashes, settings_hashes)`: an Instrument counts as covered only via current, non-stale results (`pair_checks > 0`, matching Instrument and settings hashes).
+  - `board/screening.current_results` keys perception results per (screening Test, instrument, model) and fidelity results per (instrument, model, agent).
+  - Stamps are recorded at run creation (`screening_runs.settings_hashes`, `instrument_hash`).
+  - `core/hashes`: `instrument_hash` includes `PROMPT_FORMAT`; `fidelity_hash` adds the card wording.
+  - `board/trials.any_panel_trials` ignores `p0` Trials and is the Panel guard used by `personas generate`. **Imported screening results (3.4) are not yet counted by the guard; 3.4 must make the guard also count fidelity results with a `source_study`.**
+  - Screening Tests are registered not openable, and `open` refuses them with `screening_test_not_openable`.
+  - `screen personas` and `screen models` support `--dry-run`, `--abandon` and `--resume`; `bad_option` covers conflicting flags.
 - `src/consortium/stages/personas.py` -- `_write`, `_fsync_dir`, `_exists`, `_sweep_stale`, `_move_into_place`, `INDEX_FILE`, `META_FILE`. Move these into a shared module, with no behaviour change (`_meta`, `canonical_index` and `_swap_into_place` stay). `_refuse_if_in_use` uses the widened check.
 - `src/consortium/config/load.py` -- `PERSONAS_DIR`, `load_personas`, `load_card_wording`.
 - `src/consortium/core/personas.py` -- `render_card`.

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import itertools
 import random
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -175,13 +175,16 @@ def plan_test(
     personas: Sequence[_Persona],
     instruments: Mapping[str, _Instrument],
     shapes: Sequence[_Shape] | None = None,
+    agents: Collection[str] | None = None,
 ) -> Plan:
     """Every Session and Trial of ``test`` (a ``TestConfig``) for ``cfg`` (a ``StudyConfig``).
 
     ``instruments`` must hold every Instrument the Test lists (else
     ``unknown_instrument``). ``shapes`` (story 3.2: a perception run's
     ``core.perception.check_shapes``) replaces the canonical Trial list of each Session.
-    Same inputs give the same Plan.
+    ``agents`` (story 3.3: the eligibility gate) keeps only the listed Agent IDs; ``None``
+    keeps every Agent. Seeds come from the Session ID, so a kept Agent's Trials are the
+    same as in the unfiltered Plan. Same inputs give the same Plan.
     """
     missing = [name for name in test.instruments if name not in instruments]
     if missing:
@@ -191,10 +194,13 @@ def plan_test(
     repeats = test.effective_session(cfg).repeats
     if shapes is None:
         shapes = canonical_trials(test.instruments, test.clips, instruments)
+    keep = None if agents is None else set(agents)
     sessions: list[Session] = []
     for persona in personas:
         for model_id in test.model_ids(cfg):
             agent = agent_id(persona.id, model_id)
+            if keep is not None and agent not in keep:
+                continue
             for repeat in range(1, repeats + 1):
                 sid = make_session_id(test.test, agent, repeat)
                 seed = derive_seed(cfg.seed, ORDER_PURPOSE, sid)

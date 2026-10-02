@@ -50,6 +50,7 @@ STEPS = ["begin_attempt", "append_request", "mark_sent", "set_handle", "append_r
          "record_actual", "record_validation", "set_state"]
 FOOTER = "cost: committed 0 USD, ceiling none"
 TRIALS = 64 * (2 + 2)  # 64 Personas x 1 Model x 1 Repeat x (2 godspeed + 2 pairwise)
+UNSCREENED = "unscreened_pilot: Test pilot1 runs without screening\n"
 
 
 def _add_clips(study: Path, ids: list[str]) -> None:
@@ -236,7 +237,7 @@ def test_yes_on_terminal_asks_nothing(study: Path, monkeypatch: pytest.MonkeyPat
     result = _cli("pilot1", "--yes", "--study", str(study))
     assert result.exit_code == 0, result.stderr
     assert "Run " not in result.stderr and "[y/N]" not in result.stderr
-    assert result.stderr == ""
+    assert result.stderr == UNSCREENED  # story 3.3: no screening run yet, so ungated
 
 
 def test_confirmed_on_terminal(study: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -427,7 +428,7 @@ def test_failed_trials_warn_but_exit_zero(study: Path, monkeypatch: pytest.Monke
     result = _cli("pilot1", "--yes", "--study", str(study))
     assert result.exit_code == 0, result.stderr
     assert result.stdout.splitlines()[-2:] == [f"states: failed {TRIALS}", FOOTER]
-    assert result.stderr == f"warning: {TRIALS} Trials did not end valid\n"
+    assert result.stderr == UNSCREENED + f"warning: {TRIALS} Trials did not end valid\n"
 
 
 # --------------------------------------------------------------------------- ordering
