@@ -51,6 +51,16 @@ _TRIAL_COLUMNS = (
 )
 
 
+def any_trials(conn: sqlite3.Connection) -> bool:
+    """Whether any Trial of any Test is stored; False when there is no ``trials`` table."""
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trials'"
+    ).fetchone()
+    if table is None:
+        return False
+    return conn.execute("SELECT 1 FROM trials LIMIT 1").fetchone() is not None
+
+
 def count_trials(conn: sqlite3.Connection, test: str) -> int:
     """How many Trials of ``test`` are stored."""
     return conn.execute("SELECT count(*) FROM trials WHERE test = ?", (test,)).fetchone()[0]

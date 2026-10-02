@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -441,6 +442,10 @@ def test_meta_json_provenance(study: Path) -> None:
         "frame_sha256": hashlib.sha256(frame).hexdigest(),
         "wording_sha256": hashlib.sha256(wording).hexdigest(),
         "generator_version": "1",
+        "design": {
+            "fraction": "1", "replicates": 1, "profiles": 32, "resolution": None,
+            "generators": [], "defining_relation": None, "aliasing": [],
+        },
     }
 
 
@@ -689,3 +694,418 @@ def test_old_copy_removal_failure_is_logged(
     with caplog.at_level(logging.WARNING, logger="consortium.stages.personas"):
         generate(study, force=True)
     assert any("could not remove the old Panel copy" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- story 2.4: design
+
+TEMPLATE_BIG_FIVE = "  big_five:\n    fraction: 1\n    replicates: 1\n"
+
+
+def _design(study: Path, fraction: str, replicates: int = 1) -> None:
+    _edit(
+        study / "study.yaml",
+        TEMPLATE_BIG_FIVE,
+        f"  big_five:\n    fraction: {fraction}\n    replicates: {replicates}\n",
+    )
+
+
+def _coded(persona: Persona) -> dict[str, int]:
+    return {t[0].upper(): 1 if persona.big_five[t] == "high" else -1 for t in TRAITS}
+
+
+def _profile_rows(personas: list[Persona]) -> list[dict[str, int]]:
+    seen: list[tuple[str, ...]] = []
+    rows = []
+    for p in personas:
+        key = tuple(p.big_five[t] for t in TRAITS)
+        if key not in seen:
+            seen.append(key)
+            rows.append(_coded(p))
+    return rows
+
+
+def _balanced_and_orthogonal(rows: list[dict[str, int]]) -> None:
+    letters = "OCEAN"
+    for a in letters:
+        assert sum(r[a] for r in rows) == 0, a
+        for b in letters:
+            if a < b:
+                assert sum(r[a] * r[b] for r in rows) == 0, (a, b)
+
+
+def test_template_uses_mapping_form(study: Path) -> None:
+    assert TEMPLATE_BIG_FIVE in (study / "study.yaml").read_text()
+
+
+def test_legacy_all_32_gives_golden_panel(study: Path, tmp_path: Path) -> None:
+    _edit(study / "study.yaml", TEMPLATE_BIG_FIVE, "  big_five: all_32\n")
+    cfg = load_study(study)
+    assert (cfg.personas.big_five.fraction, cfg.personas.big_five.replicates) == ("1", 1)
+    generate(study)
+    template = init_study(tmp_path / "t")
+    generate(template)
+    a, b = _tree(study / "panel"), _tree(template / "panel")
+    assert len(a) == 66
+    assert {k: v for k, v in a.items() if k != "personas/meta.json"} == {
+        k: v for k, v in b.items() if k != "personas/meta.json"
+    }
+    raw = (study / "panel" / "personas" / "index.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == GOLDEN_INDEX_SHA256
+
+
+def test_half_fraction(study: Path) -> None:
+    _design(study, "1/2")
+    result = _cli(study)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "32 personas -> panel/personas\n"
+    personas = load_personas(study)
+    assert [p.id for p in personas] == [f"p{i}" for i in range(1, 33)]
+    assert [p.nars for p in personas[:4]] == ["low", "high", "low", "high"]
+    rows = _profile_rows(personas)
+    assert len(rows) == 16
+    for r in rows:
+        assert r["N"] == r["O"] * r["C"] * r["E"] * r["A"]
+    _balanced_and_orthogonal(rows)
+    full = [
+        tuple(p.big_five[t] for t in TRAITS)
+        for p in generate_personas(load_study(init_study(study.parent / "full")))[::2]
+    ]
+    kept = [full.index(tuple(p.big_five[t] for t in TRAITS)) + 1 for p in personas[::2]]
+    assert kept == [2, 3, 5, 8, 9, 12, 14, 15, 17, 20, 22, 23, 26, 27, 29, 32]
+
+
+def test_quarter_fraction_times_three(study: Path) -> None:
+    _design(study, "0.25", 3)
+    personas = generate(study)
+    assert len(personas) == 48
+    assert [p.id for p in personas] == [f"p{i}" for i in range(1, 49)]
+    rows = _profile_rows(personas)
+    assert len(rows) == 8
+    for r in rows:
+        assert r["A"] == r["O"] * r["C"]
+        assert r["N"] == r["O"] * r["E"]
+    _balanced_and_orthogonal(rows)
+    # order: profile, then replicate, then band (band fastest)
+    for i, p in enumerate(personas):
+        profile, rest = divmod(i, 6)
+        assert _coded(p) == rows[profile]
+        assert p.nars == ["low", "high"][rest % 2]
+    # each replicate gets its own demographic draw
+    draws = {
+        tuple(getattr(personas[i + 2 * r], a) for r in range(3) for a in ("age_band", "gender"))
+        for i in range(0, 48, 6)
+    }
+    assert len(draws) > 1
+    full = [
+        tuple(p.big_five[t] for t in TRAITS)
+        for p in generate_personas(load_study(init_study(study.parent / "full")))[::2]
+    ]
+    kept = [full.index(tuple(p.big_five[t] for t in TRAITS)) + 1 for p in personas[::6]]
+    assert kept == [4, 7, 10, 13, 17, 22, 27, 32]
+
+
+@pytest.mark.parametrize(
+    ("fraction", "replicates"),
+    [("1", 1), ("1", 2), ("1", 3), ("1/2", 1), ("0.5", 2), ("1/4", 1), ("0.25", 3)],
+)
+@pytest.mark.parametrize("bands", ["[low, high]", "[high]"])
+def test_per_band_marginals_with_replicates(
+    study: Path, fraction: str, replicates: int, bands: str
+) -> None:
+    _design(study, fraction, replicates)
+    _edit(study / "study.yaml", "nars_bands: [low, high]", f"nars_bands: {bands}")
+    _set_regions(study, "[zeta, alpha, mid]")
+    cfg = load_study(study)
+    personas = generate_personas(cfg)
+    profiles = {"1": 32, "1/2": 16, "1/4": 8}[cfg.personas.big_five.fraction]
+    n = profiles * replicates * len(cfg.personas.nars_bands)
+    assert [p.id for p in personas] == [f"p{i}" for i in range(1, n + 1)]
+    for attr in ("age_band", "gender", "cultural_region", "robot_experience"):
+        levels = getattr(cfg.personas.quotas, attr)
+        k = len(levels)
+        marginal = Counter(getattr(p, attr) for p in personas)
+        assert [marginal[lv] for lv in levels] == [
+            n // k + (1 if i < n % k else 0) for i in range(k)
+        ], attr
+        for band in cfg.personas.nars_bands:
+            counts = Counter(getattr(p, attr) for p in personas if p.nars == band)
+            per = [counts[lv] for lv in levels]
+            assert max(per) - min(per) <= 1, (attr, band, per)
+
+
+@pytest.mark.parametrize(
+    ("fraction", "replicates"), [("1", 1), ("1/2", 2), ("1/4", 3), ("0.5", 1)]
+)
+def test_design_reproducible_across_folders(
+    tmp_path: Path, fraction: str, replicates: int
+) -> None:
+    a, b = init_study(tmp_path / "a"), init_study(tmp_path / "b")
+    for s in (a, b):
+        _design(s, fraction, replicates)
+        generate(s)
+    assert _tree(a / "panel") == _tree(b / "panel")
+    first = _tree(a / "panel")
+    shutil.rmtree(a / "panel")
+    generate(a)
+    assert _tree(a / "panel") == first
+
+
+@pytest.mark.parametrize(
+    ("fraction", "design"),
+    [
+        (
+            "1/2",
+            {
+                "fraction": "1/2", "replicates": 2, "profiles": 16, "resolution": "V",
+                "generators": ["N=OCEA"], "defining_relation": "I=OCEAN",
+                "aliasing": [
+                    "O=CEAN", "C=OEAN", "E=OCAN", "A=OCEN", "N=OCEA", "OC=EAN", "OE=CAN",
+                    "OA=CEN", "ON=CEA", "CE=OAN", "CA=OEN", "CN=OEA", "EA=OCN", "EN=OCA",
+                    "AN=OCE",
+                ],
+            },
+        ),
+        (
+            "0.25",
+            {
+                "fraction": "1/4", "replicates": 2, "profiles": 8, "resolution": "III",
+                "generators": ["A=OC", "N=OE"], "defining_relation": "I=OCA=OEN=CEAN",
+                "aliasing": [
+                    "O=CA=EN=OCEAN", "C=OA=EAN=OCEN", "E=ON=CAN=OCEA", "A=OC=CEN=OEAN",
+                    "N=OE=CEA=OCAN", "CE=AN=OCN=OEA", "CN=EA=OCE=OAN",
+                ],
+            },
+        ),
+    ],
+)
+def test_meta_json_design(study: Path, fraction: str, design: dict) -> None:
+    _design(study, fraction, 2)
+    generate(study)
+    meta = json.loads((study / "panel" / "personas" / "meta.json").read_bytes())
+    assert meta["design"] == design
+    assert meta["generator_version"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("fraction", "replicates"),
+    [("0.3", 1), ("1", 4), ("1", 0), ("0.5", "two"), ("1/3", 1), ("true", 1), ('"0.5"', 1)],
+)
+def test_bad_design_writes_nothing(study: Path, fraction: str, replicates: object) -> None:
+    _design(study, fraction, replicates)  # type: ignore[arg-type]
+    result = _cli(study)
+    assert result.exit_code == 1
+    assert result.stderr.startswith("config_invalid: personas.big_five"), result.stderr
+    assert not (study / "panel").exists()
+
+
+def _board_with_trial(study: Path, with_trial: bool) -> None:
+    from consortium.board.db import connect
+
+    conn = connect(study)
+    try:
+        if with_trial:
+            conn.execute(
+                "INSERT INTO tests (name, kind, path, sha256, openable, registered_at)"
+                " VALUES ('t', 'pilot', 'tests/t.yaml', 'x', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO trials (trial_id, test, session_id, trial_index, instrument,"
+                " clip_ids, prompt_variant, order_seed, repeat, agent_id, persona_id,"
+                " model_id, seq) VALUES ('t1', 't', 's', 0, 'godspeed', '[]', 'default', 1,"
+                " 1, 'a', 'p1', 'm1', 0)"
+            )
+        else:
+            conn.execute(
+                "INSERT INTO clips (clip_id, sha256, duration_s, size_bytes, width, height,"
+                " fps, pushed_at) VALUES ('c_aaaaaaaa', 'x', 1, 1, 2, 2, 25, 'now')"
+            )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_panel_in_use_refuses_and_changes_nothing(study: Path, force: bool) -> None:
+    generate(study)
+    _board_with_trial(study, with_trial=True)
+    _design(study, "1/2")
+    before = _tree(study)
+    result = _cli(study, *(["--force"] if force else []))
+    assert result.exit_code == 1
+    assert result.stderr.startswith("panel_in_use: "), result.stderr
+    assert _tree(study) == before
+
+
+def test_panel_in_use_even_when_panel_deleted(study: Path) -> None:
+    generate(study)
+    _board_with_trial(study, with_trial=True)
+    shutil.rmtree(study / "panel")
+    result = _cli(study)
+    assert result.exit_code == 1
+    assert result.stderr.startswith("panel_in_use: ")
+    assert not (study / "panel").exists()
+
+
+def test_board_without_trials_allows_regeneration(study: Path) -> None:
+    generate(study)
+    _board_with_trial(study, with_trial=False)
+    _design(study, "1/4")
+    result = _cli(study, "--force")
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "16 personas -> panel/personas\n"
+
+
+def test_any_trials_without_trials_table(tmp_path: Path) -> None:
+    import sqlite3
+
+    from consortium.board.trials import any_trials
+
+    conn = sqlite3.connect(":memory:")
+    assert any_trials(conn) is False
+    conn.execute("CREATE TABLE trials (trial_id TEXT)")
+    assert any_trials(conn) is False
+    conn.execute("INSERT INTO trials VALUES ('t1')")
+    assert any_trials(conn) is True
+
+
+def test_panel_in_use_keeps_stale_work_folders(study: Path) -> None:
+    generate(study)
+    _board_with_trial(study, with_trial=True)
+    stale = study / "panel" / ".personas-new-crashed"
+    stale.mkdir()
+    (stale / "p1.md").write_text("x")
+    before = _tree(study)
+    result = _cli(study, "--force")
+    assert result.exit_code == 1
+    assert result.stderr.startswith("panel_in_use: ")
+    assert _tree(study) == before
+    assert stale.is_dir()
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_panel_in_use_rechecked_before_rename(
+    study: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    import consortium.stages.personas as stage
+
+    if force:
+        generate(study)
+    before = _tree(study)
+    calls: list[int] = []
+
+    def trials_appear(conn) -> bool:  # an ``open`` plans Trials after the first check
+        calls.append(1)
+        return len(calls) > 1
+
+    monkeypatch.setattr(stage, "any_trials", trials_appear)
+    _board_with_trial(study, with_trial=False)
+    with pytest.raises(ConsortiumError) as info:
+        generate(study, force=force)
+    assert info.value.code == "panel_in_use"
+    assert len(calls) == 2
+    after = {k: v for k, v in _tree(study).items() if not k.startswith("board.db")}
+    assert after == before
+    assert not list((study / "panel").glob(".personas-*"))
+
+
+def test_garbage_board_is_unreadable(study: Path) -> None:
+    (study / "board.db").write_bytes(b"not a database" * 100)
+    result = _cli(study)
+    assert result.exit_code == 1
+    assert result.stderr.startswith("board_unreadable: "), result.stderr
+    assert not (study / "panel").exists()
+
+
+def _old_board(study: Path, with_trial: bool) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(study / "board.db")
+    try:
+        conn.execute("CREATE TABLE clips (clip_id TEXT PRIMARY KEY)")
+        if with_trial:
+            conn.execute("CREATE TABLE trials (trial_id TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO trials VALUES ('t1')")
+            conn.execute("PRAGMA user_version = 3")
+        else:
+            conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_older_board_without_trials_generates(study: Path) -> None:
+    _old_board(study, with_trial=False)
+    before = (study / "board.db").read_bytes()
+    result = _cli(study)
+    assert result.exit_code == 0, result.output
+    assert (study / "board.db").read_bytes() == before  # never migrated
+
+
+def test_older_board_with_trials_is_in_use(study: Path) -> None:
+    _old_board(study, with_trial=True)
+    result = _cli(study)
+    assert result.exit_code == 1
+    assert result.stderr.startswith("panel_in_use: ")
+    assert not (study / "panel").exists()
+
+
+@pytest.mark.parametrize("fraction", ["1", "1/2", "1/4"])
+@pytest.mark.parametrize("replicates", [2, 3])
+def test_replicates_have_distinct_demographics(
+    study: Path, fraction: str, replicates: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    _design(study, fraction, replicates)
+    cfg = load_study(study)
+    with caplog.at_level(logging.WARNING):
+        personas = generate_personas(cfg)
+    assert "replicates_indistinct" not in caplog.text
+    groups: dict[tuple, list[tuple]] = {}
+    for p in personas:
+        key = (tuple(p.big_five[t] for t in TRAITS), p.nars)
+        groups.setdefault(key, []).append(
+            (p.age_band, p.gender, p.cultural_region, p.robot_experience)
+        )
+    for key, tuples in groups.items():
+        assert len(tuples) == replicates
+        assert len(set(tuples)) == replicates, key
+    # swaps stay within a band: per-band counts and marginals stay exact
+    n = len(personas)
+    for attr in ("age_band", "gender", "cultural_region", "robot_experience"):
+        levels = getattr(cfg.personas.quotas, attr)
+        k = len(levels)
+        marginal = Counter(getattr(p, attr) for p in personas)
+        assert [marginal[lv] for lv in levels] == [
+            n // k + (1 if i < n % k else 0) for i in range(k)
+        ]
+        for band in cfg.personas.nars_bands:
+            per = Counter(getattr(p, attr) for p in personas if p.nars == band)
+            assert max(per[lv] for lv in levels) - min(per[lv] for lv in levels) <= 1
+
+
+def test_replicates_indistinct_warns(study: Path, caplog: pytest.LogCaptureFixture) -> None:
+    text = (study / "study.yaml").read_text()
+    text = re.sub(r"    age_band: .*\n", "    age_band: [a]\n", text)
+    text = text.replace("gender: [woman, man]", "gender: [woman]")
+    path = study / "study.yaml"
+    path.write_text(text)
+    _set_regions(study, "[zeta]")
+    _edit(path, "[none, some, regular]", "[none, some]")
+    _design(study, "1/4", 3)
+    with caplog.at_level(logging.WARNING):
+        generate_personas(load_study(study))
+    assert "replicates_indistinct: band low" in caplog.text
+
+
+def test_quota_levels_empty_warns(study: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _set_regions(study, "[a, b, c, d, e, f, g, h, i, j]")
+    _design(study, "1/4")
+    with caplog.at_level(logging.WARNING):
+        personas = generate_personas(load_study(study))
+    assert "quota_levels_empty: cultural_region: band low has no Persona at" in caplog.text
+    assert len(personas) == 16
+
+
+def test_no_quota_warning_for_template(study: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _design(study, "1/4")
+    with caplog.at_level(logging.WARNING):
+        generate_personas(load_study(study))
+    assert "quota_levels_empty" not in caplog.text

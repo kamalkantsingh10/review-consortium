@@ -675,3 +675,35 @@ def test_attrition_not_written_on_refusal(study: Path) -> None:
     assert info.value.code == "sessions_running"
     assert not (study / "exports" / "pilot1-attrition.csv").exists()
     assert not (study / "exports" / "pilot1.csv").exists()
+
+
+# --------------------------------------------------------------------------- story 2.4
+
+
+@pytest.mark.parametrize(("fraction", "replicates", "n"), [("1/4", 2, 32), (0.5, 1, 32)])
+def test_open_and_export_accept_any_design(
+    tmp_path: Path, fraction: str | float, replicates: int, n: int
+) -> None:
+    study = init_study(tmp_path / "study")
+    cfg = yaml.safe_load((study / "study.yaml").read_text())
+    cfg["personas"]["big_five"] = {"fraction": fraction, "replicates": replicates}
+    (study / "study.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    personas = personas_stage.generate(study)
+    assert [p.id for p in personas] == [f"p{i}" for i in range(1, n + 1)]
+    assert load_personas(study) == personas
+    _add_clips(study, TARGETS + PRACTICE)
+    for clip, conditions in CONDITIONS.items():
+        blinding.append_conditions(study, clip, conditions)
+    push_test(study, _write_test(study, "single", ["godspeed"]))
+    open_test(study, "single", dry_run=False, yes=True)
+    _, rows = _read(export_test(study, "single"))
+    assert len({r["agent_id"] for r in rows}) == n
+    by_persona = Counter(tuple(r[c] for c in PERSONA_COLUMNS) for r in rows)
+    expected = Counter(
+        (*(p.big_five[t] for t in TRAITS), p.nars, p.age_band, p.gender, p.cultural_region,
+         p.robot_experience)
+        for p in personas
+    )
+    per_persona = len(rows) // n
+    assert len(rows) == per_persona * n
+    assert by_persona == Counter({k: v * per_persona for k, v in expected.items()})

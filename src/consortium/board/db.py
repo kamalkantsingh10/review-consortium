@@ -267,7 +267,9 @@ def _wal_exists(study: Path) -> bool:
     return (study / f"{DB_FILE}-wal").exists()
 
 
-def _connect_readonly(study: Path, immutable: bool | None = None) -> sqlite3.Connection | None:
+def _connect_readonly(
+    study: Path, immutable: bool | None = None, allow_older: bool = False
+) -> sqlite3.Connection | None:
     """A ``mode=ro`` connection that writes no Study data.
 
     SQLite creates ``board.db-wal`` and ``board.db-shm`` when it opens a WAL
@@ -275,8 +277,9 @@ def _connect_readonly(study: Path, immutable: bool | None = None) -> sqlite3.Con
     has the database open, so it is opened ``immutable=1`` (no side files, no
     locks); otherwise the live ``-wal``/``-shm`` of the other connection are used.
     ``immutable`` forces the choice. Use ``read_only`` to also guard against a
-    writer that starts after the check. Raises ``board_unreadable``,
-    ``board_busy`` or ``board_version_mismatch``.
+    writer that starts after the check. ``allow_older`` accepts a layout older than
+    the current one (never migrated; the reader must cope with missing tables).
+    Raises ``board_unreadable``, ``board_busy`` or ``board_version_mismatch``.
     """
     db = study / DB_FILE
     if not db.is_file():
@@ -299,7 +302,7 @@ def _connect_readonly(study: Path, immutable: bool | None = None) -> sqlite3.Con
     except BaseException:
         conn.close()
         raise
-    if version != len(MIGRATIONS):
+    if version > len(MIGRATIONS) or (version < len(MIGRATIONS) and not allow_older):
         conn.close()
         newer = version > len(MIGRATIONS)
         raise ConsortiumError(
@@ -315,8 +318,14 @@ def _connect_readonly(study: Path, immutable: bool | None = None) -> sqlite3.Con
     return conn
 
 
-def read_only[T](study_dir: Path | str, read: Callable[[sqlite3.Connection], T]) -> T | None:
+def read_only[T](
+    study_dir: Path | str,
+    read: Callable[[sqlite3.Connection], T],
+    allow_older: bool = False,
+) -> T | None:
     """Run ``read`` on a read-only connection and return its result; None if no ``board.db``.
+
+    ``allow_older`` accepts an older, unmigrated layout (see ``_connect_readonly``).
 
     If the connection was ``immutable`` and a ``board.db-wal`` appeared during the
     reads (a writer started), the reads are redone with plain ``mode=ro``.
@@ -325,7 +334,7 @@ def read_only[T](study_dir: Path | str, read: Callable[[sqlite3.Connection], T])
     study = Path(study_dir)
     immutable = not _wal_exists(study)
     for attempt in (immutable, False):
-        conn = _connect_readonly(study, immutable=attempt)
+        conn = _connect_readonly(study, immutable=attempt, allow_older=allow_older)
         if conn is None:
             return None
         try:

@@ -2,7 +2,8 @@
 title: 'Story 2.4 — Panel size by fraction or replicates'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'a2ef6bd14c5b620b48f44af22fe0c7a5c9144cfb'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -57,12 +58,12 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/config/models.py`, `templates/study/study.yaml`, `docs/schema/` -- `BigFiveDesign` model with legacy normaliser; template mapping form; regenerate schemas.
-- [ ] `src/consortium/core/personas.py` -- Pure `design_profiles(fraction) -> (profiles, design_meta)`; `generate_personas` takes fraction and replicates.
-- [ ] `src/consortium/board/trials.py` -- `any_trials(conn) -> bool`.
-- [ ] `src/consortium/stages/personas.py` -- `panel_in_use`, `design` in `meta.json`.
-- [ ] `docs/INTERFACE.md` -- `personas generate` (pool = profiles × bands × replicates, ordering, aliasing table, cost lever: Trials scale linearly with N, e.g. half-fraction halves cost), `meta.json`, `personas.big_five`, error `panel_in_use`.
-- [ ] `tests/test_personas.py`, `tests/test_config.py` -- Matrix rows; half rows satisfy N = O·C·E·A and quarter rows A = O·C, N = O·E in ±1 coding; every trait column balanced and all main-effect pairs orthogonal (zero inner product); per-band exact marginals with replicates; determinism; golden unchanged; meta `design`.
+- [x] `src/consortium/config/models.py`, `templates/study/study.yaml`, `docs/schema/` -- `BigFiveDesign` model with legacy normaliser; template mapping form; regenerate schemas.
+- [x] `src/consortium/core/personas.py` -- Pure `design_profiles(fraction) -> (profiles, design_meta)`; `generate_personas` takes fraction and replicates.
+- [x] `src/consortium/board/trials.py` -- `any_trials(conn) -> bool`.
+- [x] `src/consortium/stages/personas.py` -- `panel_in_use`, `design` in `meta.json`.
+- [x] `docs/INTERFACE.md` -- `personas generate` (pool = profiles × bands × replicates, ordering, aliasing table, cost lever: Trials scale linearly with N, e.g. half-fraction halves cost), `meta.json`, `personas.big_five`, error `panel_in_use`.
+- [x] `tests/test_personas.py`, `tests/test_config.py` -- Matrix rows; half rows satisfy N = O·C·E·A and quarter rows A = O·C, N = O·E in ±1 coding; every trait column balanced and all main-effect pairs orthogonal (zero inner product); per-band exact marginals with replicates; determinism; golden unchanged; meta `design`.
 
 **Acceptance Criteria:**
 - Given the same `study.yaml`, when generated twice in different folders, then the `panel/` trees are byte-identical for every fraction and replicates value.

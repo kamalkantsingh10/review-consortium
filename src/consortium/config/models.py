@@ -338,8 +338,60 @@ class Quotas(_Strict):
         return _unique(value, "level")
 
 
+_FRACTION_FORMS: dict[Any, str] = {"1": "1", "1/2": "1/2", "1/4": "1/4"}
+_FRACTION_NUMBERS = {1: "1", 0.5: "1/2", 0.25: "1/4"}
+
+
+def _canonical_fraction(value: Any) -> Any:
+    if isinstance(value, bool):
+        raise ValueError('must be 1, 0.5, 0.25, "1", "1/2" or "1/4"')
+    if isinstance(value, str):
+        if value in _FRACTION_FORMS:
+            return _FRACTION_FORMS[value]
+    elif isinstance(value, int | float) and value in _FRACTION_NUMBERS:
+        return _FRACTION_NUMBERS[value]
+    raise ValueError('must be 1, 0.5, 0.25, "1", "1/2" or "1/4"')
+
+
+Fraction = Annotated[
+    Literal["1", "1/2", "1/4"],
+    BeforeValidator(_canonical_fraction),
+    WithJsonSchema({"enum": [1, 0.5, 0.25, "1", "1/2", "1/4"]}),
+]
+
+
+class BigFiveDesign(_Strict):
+    """The Big Five profile design (story 2.4): a fraction of the 32 profiles, replicated.
+
+    ``fraction`` is stored canonically as ``"1"``, ``"1/2"`` or ``"1/4"``.
+    """
+
+    fraction: Fraction = "1"
+    replicates: Annotated[StrictInt, Field(ge=1, le=3)] = 1
+
+
+def _legacy_big_five(value: Any) -> Any:
+    # ``all_32`` (Epic 1) is the full grid once.
+    if value == "all_32":
+        return {"fraction": "1", "replicates": 1}
+    return value
+
+
+def _legacy_big_five_schema(schema: dict[str, Any]) -> None:
+    ref = schema.pop("$ref")
+    schema["anyOf"] = [{"$ref": ref}, {"const": "all_32", "type": "string"}]
+    schema["default"] = {"fraction": "1", "replicates": 1}
+
+
 class PersonaFrame(_Strict):
-    big_five: Literal["all_32"] = "all_32"
+    big_five: Annotated[
+        BigFiveDesign,
+        BeforeValidator(_legacy_big_five),
+        Field(
+            description='The profile design; the legacy value "all_32" means the full grid.',
+            json_schema_extra=_legacy_big_five_schema,
+        ),
+    ] = Field(default_factory=BigFiveDesign)
     nars_bands: Annotated[list[Literal["low", "high"]], Field(min_length=1)] = Field(
         default_factory=lambda: ["low", "high"]
     )

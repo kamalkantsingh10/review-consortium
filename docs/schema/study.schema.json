@@ -1,5 +1,32 @@
 {
   "$defs": {
+    "BigFiveDesign": {
+      "additionalProperties": false,
+      "description": "The Big Five profile design (story 2.4): a fraction of the 32 profiles, replicated.\n\n``fraction`` is stored canonically as ``\"1\"``, ``\"1/2\"`` or ``\"1/4\"``.",
+      "properties": {
+        "fraction": {
+          "default": "1",
+          "enum": [
+            1,
+            0.5,
+            0.25,
+            "1",
+            "1/2",
+            "1/4"
+          ],
+          "title": "Fraction"
+        },
+        "replicates": {
+          "default": 1,
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Replicates",
+          "type": "integer"
+        }
+      },
+      "title": "BigFiveDesign",
+      "type": "object"
+    },
     "FakeSettings": {
       "additionalProperties": false,
       "description": "What the Fake rater reports as usage for each answer (story 1.9), how often it\nanswers invalidly (story 1.10) and how often it simulates a transient error, a\nrefusal or a fatal error (story 2.1).",
@@ -304,10 +331,20 @@
       "additionalProperties": false,
       "properties": {
         "big_five": {
-          "const": "all_32",
-          "default": "all_32",
-          "title": "Big Five",
-          "type": "string"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BigFiveDesign"
+            },
+            {
+              "const": "all_32",
+              "type": "string"
+            }
+          ],
+          "default": {
+            "fraction": "1",
+            "replicates": 1
+          },
+          "description": "The profile design; the legacy value \"all_32\" means the full grid."
         },
         "nars_bands": {
           "items": {

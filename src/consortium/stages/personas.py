@@ -17,6 +17,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from consortium.board.db import DB_FILE, read_only
+from consortium.board.trials import any_trials
 from consortium.config.load import (
     PERSONAS_DIR,
     card_wording_sha256,
@@ -28,6 +30,7 @@ from consortium.core.errors import ConsortiumError
 from consortium.core.personas import (
     GENERATOR_VERSION,
     Persona,
+    design_profiles,
     generate_personas,
     render_card,
 )
@@ -93,7 +96,10 @@ def _meta(cfg: StudyConfig) -> bytes:
     frame = json.dumps(
         cfg.personas.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+    big_five = cfg.personas.big_five
+    _, design = design_profiles(big_five.fraction, big_five.replicates)
     meta = {
+        "design": design.as_json(),
         "frame_sha256": hashlib.sha256(frame).hexdigest(),
         "generator_version": GENERATOR_VERSION,
         "seed": cfg.seed,
@@ -105,14 +111,18 @@ def _meta(cfg: StudyConfig) -> bytes:
 def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
     """Generate the Panel; returns the Personas written.
 
-    Refuses with ``panel_exists`` when ``panel/personas`` is non-empty, unless ``force``,
-    in which case the old set is replaced.
+    Refuses with ``panel_in_use`` (with or without ``force``) when ``board.db`` holds
+    any Trial: a new Panel would re-label the Personas those Trials reference. Then
+    refuses with ``panel_exists`` when ``panel/personas`` is non-empty, unless
+    ``force``, in which case the old set is replaced. Nothing is written on refusal;
+    ``board.db`` is only read (no lease, no migration).
     """
     study_dir = Path(study_dir)
     cfg = load_study(study_dir)
     wording = load_card_wording(cfg)
     target = study_dir / PERSONAS_DIR
     panel = target.parent
+    _refuse_if_in_use(study_dir)
     _sweep_stale(target)
     if _exists(target) and not force:
         raise _panel_exists()
@@ -130,6 +140,7 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
             _write(tmp / META_FILE, meta)
             os.chmod(tmp, 0o755)
             _fsync_dir(tmp)
+            _refuse_if_in_use(study_dir)  # an ``open`` may have planned Trials meanwhile
             if force:
                 _swap_into_place(tmp, target, study_dir)
             else:
@@ -144,6 +155,18 @@ def generate(study_dir: Path | str, force: bool = False) -> list[Persona]:
         ) from err
     log.info("wrote %d personas to %s", len(personas), target)
     return personas
+
+
+def _refuse_if_in_use(study_dir: Path) -> None:
+    """``panel_in_use`` when ``board.db`` holds any Trial (any layout version, never
+    migrated, no lease); ``board_unreadable`` / ``board_busy`` fail closed."""
+    if read_only(study_dir, any_trials, allow_older=True):
+        raise ConsortiumError(
+            "panel_in_use",
+            "board.db already holds Trials that reference this Panel; regenerating would "
+            "re-label them (start a new Study folder to change the Panel)",
+            path=DB_FILE,
+        )
 
 
 def _panel_exists() -> ConsortiumError:

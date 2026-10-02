@@ -1,21 +1,27 @@
 """Seeded, quota-balanced Persona generation and behaviour-only card rendering (pure).
 
-The pool is the 32 Big Five profiles (every high/low combination of O, C, E, A,
-N, ordered by bit pattern with ``low`` = 0 and O most significant), each crossed
-with every NARS band in frame order. Each quota attribute is assigned
-independently and stratified by NARS band:
+The profile set is the 32 Big Five profiles (every high/low combination of O, C,
+E, A, N, ordered by bit pattern with ``low`` = 0 and O most significant), or the
+principal half or quarter fraction of them (``design_profiles``; the kept profiles
+stay in that order). Each profile is repeated ``replicates`` times and each copy is
+crossed with every NARS band in frame order: Persona order is profile, then
+replicate, then band (band fastest). Each quota attribute is assigned independently
+and stratified by NARS band:
 
 1. The N levels are laid out round-robin in listed order (level 0, 1, ..., k-1,
    0, 1, ...), so the marginal counts are equal with the remainder going one
    each to the earliest-listed levels.
-2. The sequence is cut into consecutive blocks of 32, one per band in frame
-   order; any 32 consecutive round-robin entries hold each level 32//k or
-   32//k + 1 times, so within a band the counts differ by at most 1. A band's
-   extras continue the cycle where the previous band's stopped (the first band's
-   go to the earliest-listed levels).
+2. The sequence is cut into consecutive blocks of ``profiles x replicates`` (32 for
+   the full grid), one per band in frame order; any such run of round-robin entries
+   holds each level within 1 of the others, so within a band the counts differ by at
+   most 1. A band's extras continue the cycle where the previous band's stopped (the
+   first band's go to the earliest-listed levels).
 3. Each block is shuffled (in band order) with one ``random.Random(derive_seed(
    seed, "personas", <attribute>))`` and dealt to that band's Personas in Persona
-   order.
+   order, so every replicate gets its own slot and its own demographic draw.
+4. Replicate copies of one profile in one band whose four quota levels coincide are
+   made distinct by swapping one attribute's level with a Persona of the same band
+   (see ``_separate_replicates``); counts per band and marginals are unchanged.
 
 The shuffle is an explicit Fisher-Yates driven only by ``Random.getrandbits``
 (Mersenne Twister output, stable across Python versions), never ``random.shuffle``.
@@ -23,8 +29,10 @@ The shuffle is an explicit Fisher-Yates driven only by ``Random.getrandbits``
 
 from __future__ import annotations
 
+import logging
 import random
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, StrictStr, field_validator
@@ -43,9 +51,12 @@ TRAITS: tuple[Trait, ...] = (
 )
 QUOTA_ATTRIBUTES = ("age_band", "gender", "cultural_region", "robot_experience")
 SEED_PURPOSE = "personas"
-PROFILES = 2 ** len(TRAITS)
 # Bump when the generation or card algorithm changes; written to panel/personas/meta.json.
+# Story 2.4 kept "1": the full grid once gives byte-identical cards and index.json, and a
+# meta.json without ``design`` means that full grid.
 GENERATOR_VERSION = "1"
+
+log = logging.getLogger(__name__)
 
 
 class Persona(BaseModel):
@@ -80,7 +91,13 @@ class _Quotas(Protocol):
     robot_experience: list[str]
 
 
+class _BigFive(Protocol):
+    fraction: str
+    replicates: int
+
+
 class _Frame(Protocol):
+    big_five: _BigFive
     nars_bands: list[str]
     quotas: _Quotas
 
@@ -148,20 +165,217 @@ def stratified_levels(
     return blocks
 
 
+# Fractional designs (story 2.4). Factors are O, C, E, A, N (TRAITS order); high = +1,
+# low = -1. Each fraction is the principal one: every generator word multiplies to +1.
+FRACTIONS = ("1", "1/2", "1/4")
+_LETTERS = "OCEAN"
+# fraction -> (generators as (generated trait index, (generating trait indices)), resolution)
+_DESIGNS: dict[str, tuple[tuple[tuple[int, tuple[int, ...]], ...], str | None]] = {
+    "1": ((), None),
+    "1/2": (((4, (0, 1, 2, 3)),), "V"),  # N = O*C*E*A; I = OCEAN
+    "1/4": (((3, (0, 1)), (4, (0, 2))), "III"),  # A = O*C, N = O*E; I = OCA = OEN = CEAN
+}
+
+
+@dataclass(frozen=True)
+class PanelDesign:
+    """The Panel's profile design, written once to ``meta.json`` as ``design``.
+
+    ``resolution`` is ``"V"``, ``"III"`` or None (full grid); ``generators`` e.g.
+    ``("N=OCEA",)``; ``defining_relation`` e.g. ``"I=OCEAN"`` (None for the full grid);
+    ``aliasing`` one ``"X=Y=..."`` chain per alias class other than I, every effect in
+    trait letters, lowest order first (empty for the full grid).
+    """
+
+    fraction: str
+    replicates: int
+    profiles: int
+    resolution: str | None
+    generators: tuple[str, ...]
+    defining_relation: str | None
+    aliasing: tuple[str, ...]
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "fraction": self.fraction,
+            "replicates": self.replicates,
+            "profiles": self.profiles,
+            "resolution": self.resolution,
+            "generators": list(self.generators),
+            "defining_relation": self.defining_relation,
+            "aliasing": list(self.aliasing),
+        }
+
+
+def _word(indices: frozenset[int]) -> str:
+    return "".join(_LETTERS[i] for i in sorted(indices))
+
+
+def _effect_key(effect: frozenset[int]) -> tuple[int, tuple[int, ...]]:
+    return (len(effect), tuple(sorted(effect)))
+
+
+def design_profiles(
+    fraction: str, replicates: int = 1
+) -> tuple[list[dict[Trait, Pole]], PanelDesign]:
+    """The profiles of ``fraction`` (``"1"``, ``"1/2"`` or ``"1/4"``) and the design (pure).
+
+    The profiles are a filter of ``big_five_profiles()`` (bit-pattern order kept).
+    """
+    try:
+        generators, resolution = _DESIGNS[fraction]
+    except KeyError:
+        raise ValueError(f"unknown fraction {fraction!r}; expected one of {FRACTIONS}") from None
+    profiles = [
+        p
+        for p in big_five_profiles()
+        if all(
+            _sign(p, generated) == _product(p, generating)
+            for generated, generating in generators
+        )
+    ]
+    words = {frozenset((generated, *generating)) for generated, generating in generators}
+    group = {frozenset()}
+    for w in words:
+        group |= {g ^ w for g in group}
+    defining = sorted(group - {frozenset()}, key=_effect_key)
+    classes: list[list[frozenset[int]]] = []
+    if defining:
+        seen: set[frozenset[int]] = set()
+        effects = [
+            frozenset(i for i in range(len(TRAITS)) if (mask >> i) & 1)
+            for mask in range(1, 2 ** len(TRAITS))
+        ]
+        for effect in sorted(effects, key=_effect_key):
+            if effect in seen:
+                continue
+            chain = sorted({effect ^ g for g in group}, key=_effect_key)
+            seen.update(chain)
+            if frozenset() not in chain:
+                classes.append(chain)
+    design = PanelDesign(
+        fraction=fraction,
+        replicates=replicates,
+        profiles=len(profiles),
+        resolution=resolution,
+        generators=tuple(
+            f"{_LETTERS[generated]}={_word(frozenset(generating))}"
+            for generated, generating in generators
+        ),
+        defining_relation="=".join(["I", *(_word(w) for w in defining)]) if defining else None,
+        aliasing=tuple("=".join(_word(e) for e in chain) for chain in classes),
+    )
+    return profiles, design
+
+
+def _sign(profile: Mapping[Trait, Pole], index: int) -> int:
+    return 1 if profile[TRAITS[index]] == "high" else -1
+
+
+def _product(profile: Mapping[Trait, Pole], indices: Sequence[int]) -> int:
+    out = 1
+    for i in indices:
+        out *= _sign(profile, i)
+    return out
+
+
+def _separate_replicates(
+    blocks: Mapping[str, list[list[str]]], replicates: int, band_names: Sequence[str]
+) -> None:
+    """Make replicate copies of each profile within a band differ in some quota level.
+
+    Within a band, slot ``q * replicates + r`` is replicate ``r`` of profile ``q``.
+    Walking the band's slots in order, a slot whose level tuple equals another copy's
+    of its profile swaps one attribute's level (attributes in ``QUOTA_ATTRIBUTES``
+    order) with the first other slot of the band (in slot order) for which both groups
+    then hold distinct tuples. Swaps stay within the band, so every count is kept.
+    Logs ``replicates_indistinct`` when no such swap exists. Deterministic.
+    """
+    if replicates < 2:
+        return
+    for b, band in enumerate(band_names):
+        cols = [blocks[attr][b] for attr in QUOTA_ATTRIBUTES]
+        size = len(cols[0])
+
+        def tup(i: int, cols: list[list[str]] = cols) -> tuple[str, ...]:
+            return tuple(col[i] for col in cols)
+
+        def mates(i: int) -> range:
+            q = i // replicates
+            return range(q * replicates, (q + 1) * replicates)
+
+        def distinct(i: int) -> bool:
+            return all(tup(i) != tup(m) for m in mates(i) if m != i)
+
+        for i in range(size):
+            if distinct(i):
+                continue
+            fixed = False
+            for col in cols:
+                for j in range(size):
+                    if j // replicates == i // replicates or col[i] == col[j]:
+                        continue
+                    col[i], col[j] = col[j], col[i]
+                    if distinct(i) and distinct(j) and all(
+                        distinct(m) for m in mates(i) if m < i
+                    ):
+                        fixed = True
+                        break
+                    col[i], col[j] = col[j], col[i]
+                if fixed:
+                    break
+            if not fixed:
+                log.warning(
+                    "replicates_indistinct: band %s: replicates of profile %d share every "
+                    "quota level (too few level combinations)",
+                    band, i // replicates + 1,
+                )
+
+
+def _warn_empty_levels(
+    blocks: Mapping[str, list[list[str]]], levels: Mapping[str, Sequence[str]],
+    band_names: Sequence[str],
+) -> None:
+    for attr in QUOTA_ATTRIBUTES:
+        for b, band in enumerate(band_names):
+            missing = [lv for lv in levels[attr] if lv not in blocks[attr][b]]
+            if missing:
+                log.warning(
+                    "quota_levels_empty: %s: band %s has no Persona at %s (a band holds "
+                    "profiles x replicates = %d Personas)",
+                    attr, band, ", ".join(missing), len(blocks[attr][b]),
+                )
+
+
 def generate_personas(cfg: _Study) -> list[Persona]:
-    """The full Persona pool for ``cfg`` (a ``StudyConfig``): ``p1 ... pN``, N = 32 x bands."""
+    """The Persona pool for ``cfg`` (a ``StudyConfig``): ``p1 ... pN``.
+
+    N = profiles x replicates x bands, where the profiles come from
+    ``design_profiles(cfg.personas.big_five.fraction)``; order is profile, then
+    replicate, then band.
+    """
     frame = cfg.personas
     bands = list(frame.nars_bands)
-    grid = [(profile, band) for profile in big_five_profiles() for band in bands]
+    replicates = frame.big_five.replicates
+    profiles, _ = design_profiles(frame.big_five.fraction, replicates)
+    grid = [
+        (profile, band)
+        for profile in profiles
+        for _replicate in range(replicates)
+        for band in bands
+    ]
+    levels = {attr: list(getattr(frame.quotas, attr)) for attr in QUOTA_ATTRIBUTES}
     blocks = {
         attr: stratified_levels(
-            getattr(frame.quotas, attr),
+            levels[attr],
             len(bands),
-            PROFILES,
+            len(profiles) * replicates,
             derive_seed(cfg.seed, SEED_PURPOSE, attr),
         )
         for attr in QUOTA_ATTRIBUTES
     }
+    _warn_empty_levels(blocks, levels, bands)
+    _separate_replicates(blocks, replicates, bands)
     out = []
     for i, (profile, band) in enumerate(grid):
         b, slot = i % len(bands), i // len(bands)

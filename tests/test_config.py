@@ -95,7 +95,7 @@ def test_fresh_study_loads(study: Path) -> None:
     assert cfg.thresholds.invalid_rate_max == 0.05
     assert cfg.thresholds.leak_tolerance.duration_s == 1.0
     assert cfg.thresholds.leak_tolerance.loudness_lufs == 2.0
-    assert cfg.personas.big_five == "all_32"
+    assert (cfg.personas.big_five.fraction, cfg.personas.big_five.replicates) == ("1", 1)
     assert cfg.personas.nars_bands == ["low", "high"]
 
     instruments = load_instruments(study, cfg)
@@ -897,3 +897,74 @@ def test_qwen_base_url_needs_valid_host_and_port(study: Path, url: str) -> None:
     with pytest.raises(ConsortiumError) as info:
         load_study(study)
     assert info.value.code == "config_invalid" and "base_url" in info.value.message
+
+
+# --------------------------------------------------------------------------- story 2.4: big_five
+
+_BIG_FIVE = "  big_five:\n    fraction: 1\n    replicates: 1\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "fraction", "replicates"),
+    [
+        ("{fraction: 1, replicates: 1}", "1", 1),
+        ("all_32", "1", 1),
+        ("{}", "1", 1),
+        ("{fraction: 0.5}", "1/2", 1),
+        ("{fraction: 1/2, replicates: 2}", "1/2", 2),
+        ('{fraction: "1/2"}', "1/2", 1),
+        ("{fraction: 0.25, replicates: 3}", "1/4", 3),
+        ("{fraction: 1/4}", "1/4", 1),
+        ('{fraction: "1"}', "1", 1),
+        ("{fraction: 1.0}", "1", 1),
+        ("{fraction: 0.50}", "1/2", 1),
+    ],
+)
+def test_big_five_design_forms(study: Path, value: str, fraction: str, replicates: int) -> None:
+    _edit(study / "study.yaml", _BIG_FIVE, f"  big_five: {value}\n")
+    design = load_study(study).personas.big_five
+    assert (design.fraction, design.replicates) == (fraction, replicates)
+    assert design.model_dump(mode="json") == {"fraction": fraction, "replicates": replicates}
+
+
+def test_big_five_default_when_omitted(study: Path) -> None:
+    _edit(study / "study.yaml", _BIG_FIVE, "")
+    design = load_study(study).personas.big_five
+    assert (design.fraction, design.replicates) == ("1", 1)
+
+
+@pytest.mark.parametrize(
+    ("value", "field"),
+    [
+        ("{fraction: 0.3}", "personas.big_five.fraction"),
+        ("{fraction: 0}", "personas.big_five.fraction"),
+        ("{fraction: 2}", "personas.big_five.fraction"),
+        ('{fraction: "0.5"}', "personas.big_five.fraction"),
+        ("{fraction: 1/3}", "personas.big_five.fraction"),
+        ("{fraction: true}", "personas.big_five.fraction"),
+        ('{fraction: "1/2 "}', "personas.big_five.fraction"),
+        ('{fraction: "½"}', "personas.big_five.fraction"),
+        ("{replicates: 4}", "personas.big_five.replicates"),
+        ("{replicates: 0}", "personas.big_five.replicates"),
+        ('{replicates: "2"}', "personas.big_five.replicates"),
+        ("{replicates: 1.0}", "personas.big_five.replicates"),
+        ("{fraction: 1, extra: 1}", "personas.big_five.extra"),
+        ("all_64", "personas.big_five"),
+        ("1", "personas.big_five"),
+    ],
+)
+def test_big_five_design_invalid(study: Path, value: str, field: str) -> None:
+    _edit(study / "study.yaml", _BIG_FIVE, f"  big_five: {value}\n")
+    err = _err(load_study, study)
+    assert (err.code, err.path) == ("config_invalid", "study.yaml")
+    assert err.message.startswith(f"{field}"), err.message
+
+
+def test_big_five_schema_accepts_mapping_and_legacy() -> None:
+    schema = StudyConfig.model_json_schema()
+    big_five = schema["$defs"]["PersonaFrame"]["properties"]["big_five"]
+    assert big_five["anyOf"][1] == {"const": "all_32", "type": "string"}
+    assert big_five["default"] == {"fraction": "1", "replicates": 1}
+    design = schema["$defs"]["BigFiveDesign"]["properties"]
+    assert design["fraction"]["enum"] == [1, 0.5, 0.25, "1", "1/2", "1/4"]
+    assert (design["replicates"]["minimum"], design["replicates"]["maximum"]) == (1, 3)
