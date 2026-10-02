@@ -13,6 +13,7 @@ from typer.core import TyperGroup
 
 from consortium.core.errors import ConsortiumError
 from consortium.stages import personas as personas_stage
+from consortium.stages.export import export_test
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, usd
 from consortium.stages.push import push_clip, push_test
@@ -200,3 +201,13 @@ def status_cmd(
         typer.echo(json.dumps(report.to_json(), indent=2))
     else:
         typer.echo(format_table(report.rows, report.footer()))
+
+
+@app.command("export")
+def export_cmd(
+    test: Annotated[str, typer.Argument(help="Name of a registered, finished Test.")],
+    study: StudyOption = Path("."),
+) -> None:
+    """Write exports/TEST.csv: one row per Item per Trial, Conditions joined from
+    blinding_key.csv. Refuses while any Trial is planned or sent. Read-only; no lease."""
+    typer.echo(str(export_test(study, test)))

@@ -430,6 +430,71 @@ committed 0 / ceiling none   state: ok
 | `TEST` not registered | Nothing on stdout; `unknown_test: TEST is not a registered Test`, exit `1` |
 | `board.db` layout version not this tool's | Nothing on stdout; `board_version_mismatch`, exit `1` |
 
+### `consortium export TEST [--study PATH]`
+
+Writes `exports/<TEST>.csv`, a tidy CSV for analysis in R or Python, and prints its path on stdout. Conditions are joined from `blinding_key.csv` at this moment only (they never enter `board.db`, the Archive or the logs).
+
+`export` only reads: like `status` it opens `board.db` read-only in one read transaction, never takes the `board.lock` lease (so it works while another Test is dispatching) and writes nothing but the CSV (to a uniquely named temporary file in `exports/`, fsynced, renamed over any previous export, then the `exports/` folder is fsynced). `board.db`, `archive/` and `blinding_key.csv` stay byte-for-byte unchanged. Exporting the same state twice gives identical bytes. One file per Test; Tests are never mixed.
+
+It refuses unless every Trial of the Test is terminal (`valid`, `invalid`, `refused` or `failed`): any `planned` or `sent` Trial (a Run in progress, stopped or paused) gives `sessions_running`. It also checks that every stored Persona card `panel/personas/p<n>.md` still equals the card regenerated from `index.json` and the built-in wording (`panel_mismatch` otherwise).
+
+Order of checks: the `board.db` checks, then the Panel and Instrument checks; only then is `blinding_key.csv` read (once), followed by the Condition-column checks (`condition_name_clash`) and the stored-answer checks (`instrument_changed`, `board_unreadable`). A refusal at any step writes no file.
+
+**Rows.** One row per Item per Trial, so every Trial has at least one row: ordered by `session_id` (natural order, so `p2` before `p10`), then `trial_index`, then the Instrument's Item order. A `valid` Trial exports the answer of its highest valid attempt. Every other Trial (`invalid`, `refused`, `failed`) exports the same rows with `response` **empty** and `status` set: an empty `response` always means "no valid answer", never a value. Practice clips and their intended answers never appear. The tool computes no exclusions and no statistics.
+
+**Columns**, in this order (schema version `1`; a later epic fills its columns without changing the version):
+
+| Column | Meaning |
+| --- | --- |
+| `schema_version` | `1` on every row (the export schema version, so it travels with the file). |
+| `agent_id` | `p<n>-m<n>`. |
+| `session_id` | `<test>/<agent>/r<repeat>`. |
+| `trial_index` | The Trial's 1-based position in its Session. |
+| `clip_id` | Single-clip Trials: the rated Clip. Empty on pairwise rows. |
+| `pair_id` | Pairwise Trials: `<instrument>:<clip_lo>:<clip_hi>`. Empty on single-clip rows. |
+| `clip_id_a`, `clip_id_b` | Pairwise Trials: the Clips in the order shown (`A` first, then `B`). Empty on single-clip rows. |
+| `persona_openness`, `persona_conscientiousness`, `persona_extraversion`, `persona_agreeableness`, `persona_neuroticism` | The Persona's Big Five poles (`high` / `low`). |
+| `persona_nars`, `persona_age_band`, `persona_gender`, `persona_cultural_region`, `persona_robot_experience` | The Persona's other attributes from `index.json` (one `persona_<field>` per Persona field except `id`, in field order). |
+| `model` | Model ID (`m<n>`). |
+| Condition columns | Factors from `blinding_key.csv` of the Test's target Clips, sorted by name (none when no target Clip has a Condition). Per factor: `<factor>` (if the Test has single-clip Trials; filled on single-clip rows) then `<factor>_a`, `<factor>_b` (if it has pairwise Trials; the levels of `clip_id_a` / `clip_id_b`, filled on pairwise rows). Empty where the row's kind does not apply or the Clip has no level for that factor (a Clip pushed with no Condition has empty cells for every factor). |
+| `instrument` | Instrument name. |
+| `item` | Item ID. |
+| `response` | `valid` Trials: the Likert integer, the free text, or for a pairwise Item the **chosen Clip ID** (option `A` → `clip_id_a`, `B` → `clip_id_b`). Empty for every other status. |
+| `position` | Pairwise: `1` (`clip_lo` shown first) or `2`. Empty for single-clip. |
+| `repeat` | Repeat number. |
+| `seed` | The exported attempt's Model seed: the winning (highest valid) attempt, else the last attempt; empty if none was started. |
+| `prompt_variant` | Prompt variant name. |
+| `status` | The Trial's terminal state: `valid`, `invalid`, `refused` or `failed`. |
+| `excluded` | `false` (exclusions arrive in Epic 4). |
+| `exclusion_reason` | Empty (Epic 4). |
+| `test_kind` | `pilot`, `screening` or `main`. |
+| `protocol_lock` | Empty (Epic 4). |
+| `timestamp` | When the exported attempt was answered (else sent), UTC ISO 8601 with milliseconds and `Z`; empty if none. |
+
+UTF-8, `\n` line endings, standard CSV quoting (Python `csv`), header row first.
+
+Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@`. A spreadsheet may run such a cell as a formula: import the file as text, or analyse it in R or Python.
+
+**stderr** (logging, warnings): the invalid-answer rate per Model (`invalid_rate: model m1 0.1172 (valid 226, invalid 30, refused 0, failed 0)`, `n/a` with no valid or invalid Trial) and each Agent whose rate is above `thresholds.invalid_rate_max` (`invalid_rate_above_max: agent p2-m1 0.2500 > 0.05`), both from the one invalid-rate definition. Condition values are never logged.
+
+| Situation | Result |
+| --- | --- |
+| Every Trial terminal | `exports/<TEST>.csv`, its path on stdout; exit `0` |
+| Any Trial `planned` or `sent` (running, stopped or paused) | No file; `sessions_running: <n> Trials not terminal`, exit `1` |
+| Test registered, never opened | No file; `nothing_to_export: <TEST>`, exit `1` |
+| `TEST` not registered (or no `board.db`) | No file; `unknown_test: <TEST>`, exit `1` |
+| A target Clip has no row in `blinding_key.csv` (pushed with no Condition, or no key file at all) | Exported; its Condition cells are empty; exit `0` |
+| `blinding_key.csv` exists but cannot be read | No file; `blinding_key_missing: blinding_key.csv cannot be read: <reason>`, exit `1` |
+| A Condition column would equal another column (e.g. factor `model`, or `clip_id` in a pairwise Test) | No file; `condition_name_clash: <factor>`, exit `1` |
+| A stored Persona card differs from its regenerated card | No file; `panel_mismatch: panel/personas/p<n>.md`, exit `1` |
+| `panel/personas/index.json` absent | No file; `panel_missing`, exit `1` |
+| The Panel cannot be read (bad `index.json`, a card missing or unreadable) | No file; `panel_invalid`, exit `1` |
+| An Instrument of the Trials is no longer loaded (config edited) | No file; `unknown_instrument`, exit `1` |
+| A valid Trial's stored answers do not have exactly its Instrument's Items (Items added or removed after the Run) | No file; `instrument_changed: <instrument>: stored answers do not match its Items`, exit `1` |
+| `board.db` unreadable, an attempt row missing, or a stored answer or `clip_ids` of the wrong type or length (a Likert value that is not an integer, a free-text or pairwise value that is not a string, a pairwise value not among the options, `clip_ids` not 1 or 2 long) | No file; `board_unreadable`, exit `1` |
+| Run again on the same state | Identical bytes; the old file is replaced |
+| Another Test is dispatching (`board.lock` held) | Export succeeds |
+
 ## Error codes
 
 | Code | Raised by | Meaning |
@@ -442,14 +507,14 @@ committed 0 / ceiling none   state: ok
 | `no_audio` | `push clip` | The input file has no audio stream. |
 | `media_unreadable` | `push clip` | The input file is missing, or ffmpeg cannot read or decode it. |
 | `push_failed` | `push clip`, `push test` | The file system or SQLite failed while storing the Clip or Test; nothing was stored. For `push clip` the message names no source path. |
-| `board_busy` | any writing command; any read-only command (`open --dry-run`, `status`) | Another process holds the `board.db` lock past the busy timeout. Try again. |
-| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates: `open --dry-run`, `status`) also raises it for an older version. |
-| `board_unreadable` | any read-only command (`open --dry-run`, `status`), `open` | `board.db` is corrupt or SQLite cannot open or read it, or a ledger amount is not a decimal. |
+| `board_busy` | any writing command; any read-only command (`open --dry-run`, `status`, `export`) | Another process holds the `board.db` lock past the busy timeout. Try again. |
+| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates: `open --dry-run`, `status`, `export`) also raises it for an older version. |
+| `board_unreadable` | any read-only command (`open --dry-run`, `status`, `export`), `open` | `board.db` is corrupt or SQLite cannot open or read it, or a ledger amount is not a decimal; for `export` also a missing attempt row or a stored answer or `clip_ids` of the wrong type or length. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
 | `panel_exists` | `personas generate` | `panel/personas/` already holds files; pass `--force` to replace them. |
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
-| `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
-| `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
+| `panel_missing` | any command that needs Personas (`open`, `export`) | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
+| `panel_invalid` | any command that needs Personas (`open`, `export`) | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing (or, for `export`, unreadable). |
 | `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
 | `test_changed` | `push test`, `open` | The Test file changed while it was being validated, or (for a Run or `--resume`) the Test file, its requests, its non-terminal Trials or its providers changed between the confirmation and the lease; nothing was registered, planned or stored. |
 | `test_exists` | `push test`, `open` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
@@ -458,7 +523,7 @@ committed 0 / ceiling none   state: ok
 | `bad_practice` | `push test`, `open` | A Practice Clip is not pushed or is also a target, a pairwise example lists the same Clip twice, or an Instrument has fewer than `session.practice_clips` Practice examples. |
 | `clip_kind_overlap` | `push test` | A target Clip is already a target of a registered Test of the other side (`main` vs `pilot`/`screening`). |
 | `media_limit_exceeded` | `push test`, `open` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
-| `unknown_test` | `open`, `status` | The Test is not registered (or there is no `board.db` yet). |
+| `unknown_test` | `open`, `status`, `export` | The Test is not registered (or there is no `board.db` yet). |
 | `protocol_lock_unavailable` | `open` | The Test is `kind: main` (main Tests open only once the Protocol lock exists, Epic 4), or is otherwise registered as not openable. |
 | `invalid_response` | `open`, `open --resume` (recorded, not printed) | A Model's raw answer failed the Instrument's response schema; the reason (`not_json`, `missing_item`, `out_of_range:<item>`, ...) is stored as the attempt's `invalid_reason` and the Trial is retried or becomes `invalid` (see [Response validation and retries](#response-validation-and-retries)). Never an exit code. |
 | `invalid_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0; nothing changed. |
@@ -480,7 +545,13 @@ committed 0 / ceiling none   state: ok
 | `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results), or `--resume` found a stored handle that is not a JSON object. The Run stopped. |
 | `bad_concurrency` | `open` | The engine was given a concurrency below 1 (an internal check; `study.yaml` already requires at least 1). |
 | `bad_max_retries` | `open` | The engine was given `max_retries` below 0 (an internal check; the config already requires at least 0). |
-| `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
+| `sessions_running` | `export` | A Trial of the Test is still `planned` or `sent` (`<n> Trials not terminal`); finish or resume the Run first. Nothing was written. |
+| `nothing_to_export` | `export` | The Test is registered but has no Trials (never opened). |
+| `blinding_key_missing` | `export` | `blinding_key.csv` exists but cannot be read or parsed. (A Clip with no row, or no key file at all, is not an error: its Condition cells are empty.) |
+| `instrument_changed` | `export` | A valid Trial's stored answers do not have exactly the Items of its Instrument as now configured (Items were added or removed after the Run); the message names the Instrument. |
+| `condition_name_clash` | `export` | A Condition factor would produce a column that equals another export column (for example a factor named `model`); the message is the factor. |
+| `panel_mismatch` | `export` | A stored Persona card `panel/personas/p<n>.md` differs from the card regenerated from `index.json` and the built-in wording, or a Trial's Persona is not in the Panel. |
+| `unknown_instrument` | any command that loads config (including `export`) | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`; for `export`, an Instrument of the Test's Trials is no longer loaded. |
 
 ## Study folder layout
 
@@ -499,7 +570,7 @@ committed 0 / ceiling none   state: ok
   board.lock           Exclusive lease held by a dispatching command.               (open)
   archive/requests.jsonl   Append-only rendered requests.                           (open)
   archive/responses.jsonl  Append-only raw responses.                               (open)
-  exports/             Export CSVs and reports; leak-report.csv from push clip.     (exports in story 1.12)
+  exports/             <test>.csv from export; leak-report.csv from push clip.      (export, push clip)
   protocol.lock        Hashes of every file that affects the data.                  (arrives in story 4.1)
 ```
 
@@ -568,7 +639,7 @@ Table `ceiling_changes` (version 4), one row per `open --ceiling`: `ts` (UTC ISO
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
-Read-only commands (`open --dry-run`, `status`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
+Read-only commands (`open --dry-run`, `status`, `export`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
 
 ### `board.lock`
 
@@ -586,6 +657,10 @@ Media appear only as Clip ID + SHA-256. The Archive never holds a Condition, a s
 ### `blinding_key.csv`
 
 The only place Conditions exist. Long CSV with header `clip_id,factor,level`, one row per Clip and factor, appended (and fsynced) by `push clip`. A Clip pushed with no Condition has no rows. The file is created by the first push that has a Condition. Only the push and export stages read it.
+
+### `exports/<test>.csv`
+
+Written only by `consortium export` (see [the command](#consortium-export-test---study-path) for every column). Replaced whole on each export; never mixes Tests.
 
 ### `exports/leak-report.csv`
 

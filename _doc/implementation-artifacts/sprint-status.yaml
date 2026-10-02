@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-02-2026 02:07
-last_updated: 10-02-2026 05:35
+last_updated: 10-02-2026 05:50
 project: review-consortium
 project_key: NOKEY
 tracking_system: file-system
@@ -47,7 +47,7 @@ development_status:
   1-9-cost-estimate-ceiling-pause-and-resume: review
   1-10-response-validation-retries-and-invalid-answers: review
   1-11-status: review
-  1-12-export-with-blinding-join: backlog
+  1-12-export-with-blinding-join: review
   epic-1-retrospective: optional
 
   epic-2: backlog

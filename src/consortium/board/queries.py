@@ -1,4 +1,4 @@
-"""Read-only aggregate queries over ``board.db`` for ``status`` (story 1.11).
+"""Read-only queries over ``board.db`` for ``status`` (story 1.11) and ``export`` (1.12).
 
 Every function here only reads. Each runs in one read transaction (a single
 snapshot) unless the caller already opened one with ``read_transaction``, so
@@ -20,7 +20,8 @@ from consortium.board.ledger import (
     register_decimal_sum,
     summed,
 )
-from consortium.board.trials import TRIAL_STATES
+from consortium.board.trials import TRIAL_STATES, chosen_answer, load_trials
+from consortium.core.errors import ConsortiumError
 
 
 @contextmanager
@@ -122,3 +123,46 @@ def cost_footer(conn: sqlite3.Connection) -> dict[str, Any]:
             )
         ]
     return {"committed": committed, "ceiling": ceiling, "paused": paused}
+
+
+def export_trials(conn: sqlite3.Connection, test: str) -> list[dict[str, Any]]:
+    """Every Trial of ``test`` with its state and exported attempt, for ``export`` (story 1.12).
+
+    Each row is a ``trials.load_trials`` row (``clip_ids`` a tuple, plus ``state``
+    and ``attempt``) and:
+
+    - ``answers``: the parsed ``{item_id: value}`` of the highest valid attempt
+      (``trials.chosen_answer``) for a ``valid`` Trial, else ``None``;
+    - ``exported_attempt``: that attempt for a ``valid`` Trial, else the last
+      attempt (``attempt``; 0 when none was ever started);
+    - ``seed``, ``timestamp``: the exported attempt's seed and ``answered_at``
+      (falling back to ``sent_at``); ``None`` when no attempt was started.
+      ``board_unreadable`` when ``attempt`` > 0 has no ``attempts`` row.
+
+    Rows are in plan order; one read transaction.
+    """
+    with read_transaction(conn):
+        rows = load_trials(conn, test)
+        out = []
+        for row in rows:
+            chosen = chosen_answer(conn, row["trial_id"]) if row["state"] == "valid" else None
+            exported = chosen["attempt"] if chosen is not None else row["attempt"]
+            found = conn.execute(
+                "SELECT seed, coalesce(answered_at, sent_at) FROM attempts"
+                " WHERE trial_id = ? AND attempt = ?",
+                (row["trial_id"], exported),
+            ).fetchone()
+            if found is None and exported > 0:
+                raise ConsortiumError(
+                    "board_unreadable",
+                    f"Trial {row['trial_id']}: attempt {exported} has no attempts row",
+                )
+            seed, timestamp = found if found is not None else (None, None)
+            out.append({
+                **row,
+                "answers": chosen["answers"] if chosen is not None else None,
+                "exported_attempt": exported,
+                "seed": seed,
+                "timestamp": timestamp,
+            })
+    return out
