@@ -51,6 +51,7 @@ context:
 
 ## Code Map
 
+- **Approved input (Kamal, 2026-10-02):** `_doc/implementation-artifacts/persona-card-wording-draft.md` is APPROVED. Copy its `wording.yaml` block verbatim. Gender quota is two levels, `woman` and `man`: also change `src/consortium/templates/study/study.yaml` line `gender: [woman, man, non-binary]` to `gender: [woman, man]`, and update any test or doc that lists three genders. The 8 region placeholders stay.
 - `src/consortium/config/{models,load}.py` -- `StudyConfig.personas`, `seed`, `load_study` (1.2)
 - `src/consortium/cli.py`, `core/errors.py` -- from 1.1
 

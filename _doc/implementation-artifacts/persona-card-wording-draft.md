@@ -1,8 +1,8 @@
-# DRAFT — awaiting Kamal's approval
+# APPROVED — persona card wording (Kamal, 2026-10-02)
 
 **Persona card wording and placeholder quota levels for Story 1.3 / 1.2**
 
-Status: **DRAFT — awaiting Kamal's approval.** Do not implement Story 1.3 from this file until Kamal has approved or edited it. After approval, the wording is copied verbatim into `src/consortium/templates/persona_card/wording.yaml` (Story 1.3), and the quota levels go into the `init` template `study.yaml` as placeholders (Story 1.2).
+Status: **APPROVED by Kamal on 2026-10-02.** The wording is final as drafted. Gender quota: **two levels (woman, man), 32 each**. Regions: the 8 placeholders are kept as template defaults. After approval, the wording is copied verbatim into `src/consortium/templates/persona_card/wording.yaml` (Story 1.3), and the quota levels go into the `init` template `study.yaml` as placeholders (Story 1.2).
 
 Drafted 2026-10-02 by Claude, following the accepted decisions:
 - One sentence per Big Five pole and per NARS band, plus a short demographic line.
@@ -66,9 +66,8 @@ Quotas are balanced uniformly per attribute over 64 Personas (Story 1.3).
 | | `30-44` | aged 30 to 44 | 16 |
 | | `45-59` | aged 45 to 59 | 16 |
 | | `60+` | aged 60 or over | 16 |
-| `gender` | `woman` | a woman | 22 |
-| | `man` | a man | 21 |
-| | `non-binary` | a non-binary person | 21 |
+| `gender` | `woman` | a woman | 32 |
+| | `man` | a man | 32 |
 | `cultural_region` | `western_europe` | Western Europe | 8 |
 | | `eastern_europe` | Eastern Europe | 8 |
 | | `north_america` | North America | 8 |
@@ -111,7 +110,7 @@ nars:
   high: "You feel uneasy around robots and would rather keep some distance from them."
 level_phrases:
   age_band: {"18-29": "aged 18 to 29", "30-44": "aged 30 to 44", "45-59": "aged 45 to 59", "60+": "aged 60 or over"}
-  gender: {woman: "a woman", man: "a man", non-binary: "a non-binary person"}
+  gender: {woman: "a woman", man: "a man"}
   cultural_region: {western_europe: "Western Europe", eastern_europe: "Eastern Europe", north_america: "North America", latin_america: "Latin America", east_asia: "East Asia", south_asia: "South Asia", middle_east_north_africa: "the Middle East or North Africa", sub_saharan_africa: "Sub-Saharan Africa"}
   robot_experience: {none: "no", some: "some", regular: "regular"}
 ```

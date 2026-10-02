@@ -12,6 +12,7 @@ from typer.core import TyperGroup
 
 from consortium.core.errors import ConsortiumError
 from consortium.stages.init import init_study
+from consortium.stages.push import push_clip
 
 
 class _ConsortiumGroup(TyperGroup):
@@ -53,3 +54,26 @@ def init(
 ) -> None:
     """Create a new Study folder from the Fake-rater template."""
     typer.echo(str(init_study(path)))
+
+
+push_app = typer.Typer(help="Push Clips (and, from story 1.5, Tests) into the Study.")
+app.add_typer(push_app, name="push")
+
+StudyOption = Annotated[
+    Path, typer.Option("--study", help="Study folder (default: the current directory).")
+]
+
+
+@push_app.command("clip")
+def push_clip_cmd(
+    file: Annotated[Path, typer.Argument(help="Video file with audio to ingest.")],
+    condition: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--condition", "-c", help="factor=level; repeat for each factor. Omit for none."
+        ),
+    ] = None,
+    study: StudyOption = Path("."),
+) -> None:
+    """Re-encode FILE blind into clips/<clip_id>.mp4 and print the new Clip ID."""
+    typer.echo(push_clip(study, file, condition or []))

@@ -102,6 +102,13 @@ class MediaProfile(_Strict):
     audio_kbps: Annotated[StrictInt, Field(gt=0)] = 64
     fps: Annotated[StrictInt, Field(gt=0)] = 25
 
+    @field_validator("height")
+    @classmethod
+    def _even_height(cls, value: int) -> int:
+        if value % 2:
+            raise ValueError("must be even (H.264 yuv420p needs an even frame height)")
+        return value
+
 
 class SessionConfig(_Strict):
     practice_clips: Annotated[StrictInt, Field(ge=0)] = 2
