@@ -1,0 +1,124 @@
+"""Read-only aggregate queries over ``board.db`` for ``status`` (story 1.11).
+
+Every function here only reads. Each runs in one read transaction (a single
+snapshot) unless the caller already opened one with ``read_transaction``, so
+``status`` can read its rows and its footer from the same snapshot while a
+dispatcher is writing (WAL).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from decimal import Decimal
+from typing import Any
+
+from consortium.board.ledger import (
+    committed_usd,
+    current_ceiling,
+    register_decimal_sum,
+    summed,
+)
+from consortium.board.trials import TRIAL_STATES
+
+
+@contextmanager
+def read_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """A deferred ``BEGIN`` ... ``COMMIT`` (one snapshot); reuses an open transaction.
+
+    For read-only connections (``board.db.read_only``): it groups reads into one
+    snapshot and never writes. On an exception it rolls back (and re-raises);
+    it commits only when the block succeeds, and a failing ``COMMIT`` propagates.
+    """
+    if conn.in_transaction:
+        yield conn
+        return
+    conn.execute("BEGIN")
+    try:
+        yield conn
+    except BaseException:
+        if conn.in_transaction:
+            with suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
+def registered_tests(conn: sqlite3.Connection, test: str | None = None) -> list[str]:
+    """Names of the registered Tests (only ``test``, if given and registered), by name."""
+    if test is None:
+        return [n for (n,) in conn.execute("SELECT name FROM tests ORDER BY name")]
+    return [n for (n,) in conn.execute("SELECT name FROM tests WHERE name = ?", (test,))]
+
+
+def is_registered(conn: sqlite3.Connection, test: str) -> bool:
+    """Whether ``test`` is a registered Test."""
+    return conn.execute("SELECT 1 FROM tests WHERE name = ?", (test,)).fetchone() is not None
+
+
+def status_counts(conn: sqlite3.Connection, test: str | None = None) -> list[dict[str, Any]]:
+    """Per ``(test, model, agent)``: Trial counts by state, ``retried`` and committed cost.
+
+    Each row is ``{"test", "model", "agent", <one count per Trial state>, "trials",
+    "retried", "cost_usd"}``: ``retried`` = Σ max(attempt − 1, 0) over the
+    group's Trials (attempts beyond the first); ``cost_usd`` (``Decimal``) = Σ over
+    the group's ledger rows of the actual cost, or the reservation where it is
+    unknown. ``test`` limits the rows to one Test. Rows are ordered by Test,
+    Model, Agent (SQL text order).
+    """
+    args: tuple[str, ...] = (test,) if test is not None else ()
+    where = "WHERE test = ?" if test is not None else ""
+    ledger_where = "WHERE t.test = ?" if test is not None else ""
+    with read_transaction(conn):
+        register_decimal_sum(conn)
+        counts = conn.execute(
+            "SELECT test, model_id, agent_id, "
+            + ", ".join(f"sum(state = '{s}')" for s in TRIAL_STATES)
+            + ", count(*), sum(max(attempt - 1, 0))"
+            f" FROM trials {where} GROUP BY test, model_id, agent_id"
+            " ORDER BY test, model_id, agent_id",
+            args,
+        ).fetchall()
+        costs = {
+            (t, m, a): summed(total)
+            for t, m, a, total in conn.execute(
+                "SELECT t.test, t.model_id, t.agent_id,"
+                " decimal_sum(coalesce(l.actual_usd, l.reserved_usd))"
+                " FROM ledger l JOIN trials t ON t.trial_id = l.trial_id"
+                f" {ledger_where}"
+                " GROUP BY t.test, t.model_id, t.agent_id",
+                args,
+            )
+        }
+    out = []
+    for row in counts:
+        key = tuple(row[:3])
+        out.append({
+            "test": row[0], "model": row[1], "agent": row[2],
+            **dict(zip(TRIAL_STATES, row[3:3 + len(TRIAL_STATES)], strict=True)),
+            "trials": row[3 + len(TRIAL_STATES)],
+            "retried": row[4 + len(TRIAL_STATES)],
+            "cost_usd": costs.get(key, Decimal(0)),
+        })
+    return out
+
+
+def cost_footer(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Study-wide ``{"committed": Decimal, "ceiling": Decimal | None, "paused": [(test, reason)]}``.
+
+    ``committed`` is ``ledger.committed_usd`` (actual, else reserved), ``ceiling``
+    the latest logged ceiling (``None`` if never set), ``paused`` every Test with a
+    ``tests.paused_reason``, by Test name (empty when none is paused).
+    """
+    with read_transaction(conn):
+        committed = committed_usd(conn)
+        ceiling = current_ceiling(conn)
+        paused = [
+            (name, reason)
+            for name, reason in conn.execute(
+                "SELECT name, paused_reason FROM tests WHERE paused_reason IS NOT NULL"
+                " ORDER BY name"
+            )
+        ]
+    return {"committed": committed, "ceiling": ceiling, "paused": paused}

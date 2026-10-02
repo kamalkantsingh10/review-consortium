@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
 from consortium.stages.open import open_test, usd
 from consortium.stages.push import push_clip, push_test
+from consortium.stages.status import format_table, status
 
 
 class _ConsortiumGroup(TyperGroup):
@@ -179,3 +181,22 @@ def open_cmd(
             f"Run paused at the ceiling; continue with "
             f"`consortium open {test} --resume --ceiling <higher USD>`",
         )
+
+
+@app.command("status")
+def status_cmd(
+    test: Annotated[
+        str | None, typer.Argument(help="Show only this registered Test (default: all).")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print {rows, committed, ceiling, state} as JSON.")
+    ] = False,
+    study: StudyOption = Path("."),
+) -> None:
+    """Show Trial counts by state, retries, invalid rate and cost per Test, Model and Agent,
+    plus committed spend, the ceiling and the paused state. Read-only; safe during a Run."""
+    report = status(study, test)
+    if as_json:
+        typer.echo(json.dumps(report.to_json(), indent=2))
+    else:
+        typer.echo(format_table(report.rows, report.footer()))

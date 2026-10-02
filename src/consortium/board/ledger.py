@@ -59,20 +59,30 @@ class _DecimalSum:
         return f"bad:{self.bad}" if self.bad is not None else _text(self.total)
 
 
+def register_decimal_sum(conn: sqlite3.Connection) -> None:
+    """Register the ``decimal_sum(text)`` aggregate on ``conn`` (read it with ``summed``)."""
+    conn.create_aggregate("decimal_sum", 1, _DecimalSum)
+
+
+def summed(total: str | None) -> Decimal:
+    """A ``decimal_sum`` result as a ``Decimal`` (0 for no rows); ``board_unreadable`` if bad."""
+    if total is None:  # no rows
+        return Decimal(0)
+    if total.startswith("bad:"):
+        _amount(total[4:])  # raises board_unreadable
+    return _amount(total)
+
+
 def committed_usd(conn: sqlite3.Connection) -> Decimal:
     """Study-wide committed spend: Σ(actual, or reserved where actual is NULL).
 
     A ledger amount that is not a decimal raises ``board_unreadable``.
     """
-    conn.create_aggregate("decimal_sum", 1, _DecimalSum)
+    register_decimal_sum(conn)
     (total,) = conn.execute(
         "SELECT decimal_sum(coalesce(actual_usd, reserved_usd)) FROM ledger"
     ).fetchone()
-    if total is None:  # no ledger rows
-        return Decimal(0)
-    if total.startswith("bad:"):
-        _amount(total[4:])  # raises board_unreadable
-    return _amount(total)
+    return summed(total)
 
 
 class Spend:

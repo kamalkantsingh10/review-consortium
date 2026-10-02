@@ -238,7 +238,7 @@ With `fake.invalid_rate` (`0` to `1`, default `0`) an attempt answers invalidly 
 
 **The answer** of a Trial is its **highest valid attempt** (a query, `board.trials.chosen_answer`, not a stored pointer).
 
-**Invalid-answer rate** = Trials `invalid` ÷ (`valid` + `invalid`), empty (`None`) when both are `0`. `refused` and `failed` Trials are not in the denominator and are reported separately as counts. It is defined once (`core.validate.invalid_rate`) and reported per Agent and per Model for a Test (`board.trials.invalid_rates`: for each Agent and each Model the `valid`, `invalid`, `refused` and `failed` counts and the `rate`); `status` (story 1.11) and `export` (story 1.12) will use the same definition. The target is `thresholds.invalid_rate_max` in `study.yaml`.
+**Invalid-answer rate** = Trials `invalid` ÷ (`valid` + `invalid`), empty (`None`) when both are `0`. `refused` and `failed` Trials are not in the denominator and are reported separately as counts. It is defined once (`core.validate.invalid_rate`) and reported per Agent and per Model for a Test (`board.trials.invalid_rates`: for each Agent and each Model the `valid`, `invalid`, `refused` and `failed` counts and the `rate`); `status` (story 1.11) uses the same definition, and `export` (story 1.12) will. The target is `thresholds.invalid_rate_max` in `study.yaml`.
 
 | Situation | Result |
 | --- | --- |
@@ -381,6 +381,55 @@ Each Trial is rendered into a provider-neutral request. It holds **only**:
 
 A request contains no Trial, Session, Test, Agent or Model ID, no Instrument name or `pair_id` field, nothing from any other Trial, no Condition and no provider setting. Media are referenced by Clip ID and SHA-256 only. Its canonical JSON (sorted keys; UTF-8, where control characters are `\u`-escaped and all other text is literal UTF-8; separators `,` and `:` with no whitespace) is byte-identical for the same inputs.
 
+### `consortium status [TEST] [--json] [--study PATH]`
+
+Shows what Runs have done, failed, retried and cost so far, per Test, Model and Agent, without opening `board.db` by hand. `TEST` limits the rows to one registered Test; the footer is always Study-wide.
+
+`status` only reads: it opens `board.db` read-only (see [`board.db`](#boarddb)), never takes the `board.lock` lease, never migrates and never writes, so it works while another command is dispatching (it shows the last committed state, including `sent` Trials in flight) and leaves `board.db` byte-for-byte unchanged. It reads neither the Archive nor `blinding_key.csv` and shows no Condition.
+
+Rows, sorted by Test, Model, Agent (numbers in natural order, so `p2-m1` before `p10-m1`), totals before their parts:
+
+- one Test total per registered Test (`model` and `agent` are `*`), all zeros for a Test that was never opened;
+- one Model total per Model of the Test (`agent` is `*`);
+- one row per Agent.
+
+| Column | Meaning |
+| --- | --- |
+| `test`, `model`, `agent` | The row's Test name, Model ID and Agent ID, or `*` for a total. |
+| `trials` | The row's Trial count. |
+| `planned`, `sent`, `valid`, `invalid`, `refused`, `failed` | Trials in each state (`sent` = in flight). They add up to `trials`; a total is the sum of its rows. |
+| `retried` | Attempts beyond the first, summed over the row's Trials: Σ max(`attempt` − 1, 0). It counts retries after invalid answers and re-dispatches on resume (both cost money). After a completed Run, the row's lines in `archive/requests.jsonl` equal Trials with at least one attempt + `retried`. After a crash there can be fewer lines than that: an attempt is recorded in `board.db` before its request line is written, and an attempt the crash stopped in between has no line. |
+| `invalid_rate` | invalid ÷ (valid + invalid) of the row's counts (the one definition, see [Response validation and retries](#response-validation-and-retries)); `refused` and `failed` are separate columns. Empty (JSON `null`) when the row has no valid or invalid Trial. Printed with 4 decimals. |
+| `cost_usd` | Committed spend of the row's ledger rows: each attempt's actual cost, or its reservation where the actual cost is unknown. A decimal string (`0` when nothing was spent). |
+| `paused` | On a Test-total row: why that Test's Run is paused (`ceiling`); empty (JSON `null`) otherwise and on every Model and Agent row. |
+
+The footer, Study-wide: `committed <USD> / ceiling <USD|none>   state: <state>`, where committed is the Study's committed spend, the ceiling is the latest one set with `open --ceiling` (`none` if never set) and the state is `ok`, or `paused <test> (<reason>)` for every paused Test by name, separated by `, ` (for example `state: paused pilot1 (ceiling), pilot2 (ceiling)`).
+
+```text
+$ consortium status pilot1      # a single-Model Study (m1 only), so the Model total equals the Test total
+test    model  agent   trials  planned  sent  valid  invalid  refused  failed  retried  invalid_rate  cost_usd  paused
+pilot1  *      *          256        0     0    226       30        0       0      194        0.1172         0
+pilot1  m1     *          256        0     0    226       30        0       0      194        0.1172         0
+pilot1  m1     p1-m1        4        0     0      4        0        0       0        1        0.0000         0
+pilot1  m1     p2-m1        4        0     0      3        1        0       0        2        0.2500         0
+...
+committed 0 / ceiling none   state: ok
+```
+
+`--json` prints, instead of the table, one JSON object `{"schema_version": 1, "test": "<TEST>" | null, "rows": [...], "committed": "<USD>", "ceiling": "<USD>" | null, "state": "ok" | "paused", "paused": [{"test": "<name>", "reason": "<reason>"}, ...]}`. `test` echoes the `TEST` filter (`null` without one); `paused` lists every paused Test of the Study by name (empty when `state` is `ok`). Each row has the columns above as keys, counts as integers, `invalid_rate` as a number or `null`, `cost_usd` as a decimal string, `paused` as a string or `null`.
+
+| Situation | Result |
+| --- | --- |
+| After a Run | Test, Model and Agent rows and the footer; exit `0` |
+| `status TEST` | Only that Test's rows (just a zero Test total if it was never opened); footer still Study-wide |
+| A registered Test never opened | A Test-total row of zeros |
+| During a Run (another command holds `board.lock`) | Current committed counts, `sent` included; never `study_busy` |
+| A Test paused at the ceiling | Footer ends `state: paused <test> (ceiling)`; its Test-total row shows `ceiling` under `paused`; JSON `state` `paused` |
+| No ceiling ever set | Footer `ceiling none` (`null` in JSON) |
+| No `board.db` yet (fresh `init`) | Header only and `committed 0 / ceiling none   state: ok`; exit `0` |
+| `TEST` not registered | Nothing on stdout; `unknown_test: TEST is not a registered Test`, exit `1` |
+| `board.db` layout version not this tool's | Nothing on stdout; `board_version_mismatch`, exit `1` |
+
 ## Error codes
 
 | Code | Raised by | Meaning |
@@ -393,9 +442,9 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `no_audio` | `push clip` | The input file has no audio stream. |
 | `media_unreadable` | `push clip` | The input file is missing, or ffmpeg cannot read or decode it. |
 | `push_failed` | `push clip`, `push test` | The file system or SQLite failed while storing the Clip or Test; nothing was stored. For `push clip` the message names no source path. |
-| `board_busy` | any command that writes `board.db` | Another process holds the `board.db` lock past the busy timeout. Try again. |
-| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates, such as `open --dry-run`) also raises it for an older version. |
-| `board_unreadable` | any read-only command (`open --dry-run`), `open` | `board.db` is corrupt or SQLite cannot open or read it, or a ledger amount is not a decimal. |
+| `board_busy` | any writing command; any read-only command (`open --dry-run`, `status`) | Another process holds the `board.db` lock past the busy timeout. Try again. |
+| `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. Any read-only command (one that never migrates: `open --dry-run`, `status`) also raises it for an older version. |
+| `board_unreadable` | any read-only command (`open --dry-run`, `status`), `open` | `board.db` is corrupt or SQLite cannot open or read it, or a ledger amount is not a decimal. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
 | `panel_exists` | `personas generate` | `panel/personas/` already holds files; pass `--force` to replace them. |
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
@@ -409,7 +458,7 @@ A request contains no Trial, Session, Test, Agent or Model ID, no Instrument nam
 | `bad_practice` | `push test`, `open` | A Practice Clip is not pushed or is also a target, a pairwise example lists the same Clip twice, or an Instrument has fewer than `session.practice_clips` Practice examples. |
 | `clip_kind_overlap` | `push test` | A target Clip is already a target of a registered Test of the other side (`main` vs `pilot`/`screening`). |
 | `media_limit_exceeded` | `push test`, `open` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
-| `unknown_test` | `open` | The Test is not registered (or there is no `board.db` yet). |
+| `unknown_test` | `open`, `status` | The Test is not registered (or there is no `board.db` yet). |
 | `protocol_lock_unavailable` | `open` | The Test is `kind: main` (main Tests open only once the Protocol lock exists, Epic 4), or is otherwise registered as not openable. |
 | `invalid_response` | `open`, `open --resume` (recorded, not printed) | A Model's raw answer failed the Instrument's response schema; the reason (`not_json`, `missing_item`, `out_of_range:<item>`, ...) is stored as the attempt's `invalid_reason` and the Trial is retried or becomes `invalid` (see [Response validation and retries](#response-validation-and-retries)). Never an exit code. |
 | `invalid_ceiling` | `open` | `--ceiling` is not a decimal USD amount greater than 0; nothing changed. |
@@ -519,7 +568,7 @@ Table `ceiling_changes` (version 4), one row per `open --ceiling`: `ts` (UTC ISO
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
-Read-only commands (`open --dry-run`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
+Read-only commands (`open --dry-run`, `status`) open it with SQLite `mode=ro` and never migrate it or write Study data; when no `board.db-wal` exists they add `immutable=1`, so no `board.db-wal`/`board.db-shm` side files are created (reads are redone without it if a writer starts meanwhile). A stale `board.db-wal` left by a crashed writer can make SQLite create `board.db-shm`, which holds no Study data.
 
 ### `board.lock`
 
