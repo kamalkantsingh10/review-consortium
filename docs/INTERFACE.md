@@ -71,7 +71,7 @@ Validates a Test YAML file (see [`tests/<name>.yaml`](#testsnameyaml)) against `
 - The file is read once; those bytes are validated, hashed and copied. If the file changes while it is being validated, the push is refused with `test_changed`.
 - On success, prints the Test name to stdout and exits `0`.
 - **Checks, in order; the first failure wins** and nothing is copied or registered:
-  1. **Name.** `test:` matches `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` (lowercase letters, digits, `_` and `-`, not starting or ending with `_` or `-`) and is at most 64 characters, since it is part of every Session ID — else `bad_test_name`. The pairing plan's syntax (`session.pairing`, duplicate Clip IDs) is also checked here, before the schema, as `bad_pairing`.
+  1. **Name.** `test:` matches `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` (lowercase letters, digits, `_` and `-`, not starting or ending with `_` or `-`) and is at most 64 characters, since it is part of every Session ID, and does not end in `-attrition` (reserved for `exports/<test>-attrition.csv`) — else `bad_test_name`. The pairing plan's syntax (`session.pairing`, duplicate Clip IDs) is also checked here, before the schema, as `bad_pairing`.
   2. **Schema** (`load_test`, as for every config file): `config_invalid`, `unknown_instrument`.
   3. **Registration.** Already registered with other bytes, or `tests/<name>.yaml` exists unregistered with other bytes — `test_exists`.
   4. **References.** Every target Clip is pushed (`unknown_clip`, field `clips[i]`); every Practice Clip is pushed (`bad_practice`, field `practice[i]`).
@@ -87,7 +87,7 @@ Validates a Test YAML file (see [`tests/<name>.yaml`](#testsnameyaml)) against `
 | Valid `kind: main` Test | Registered not openable, `not_openable` note on stderr, name printed, exit `0` |
 | Same name, identical bytes, already registered | No-op, name printed, exit `0` |
 | Same name, different bytes | `test_exists`, exit `1` |
-| `test:` not matching `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or longer than 64 characters (for example `Pilot/1`, `pilot-`) | `bad_test_name`, exit `1` |
+| `test:` not matching `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`, longer than 64 characters or ending in `-attrition` (for example `Pilot/1`, `pilot-`, `pilot1-attrition`) | `bad_test_name`, exit `1` |
 | A target Clip ID that was never pushed | `unknown_clip: clips[i]: ...`, exit `1` |
 | An unknown Instrument | `unknown_instrument`, exit `1` |
 | No target Clips, a pairwise Instrument with fewer than 2 targets, duplicate Clip IDs, or `session.pairing` other than `all_pairs` | `bad_pairing`, exit `1` |
@@ -143,7 +143,7 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
   by instrument: godspeed 768, pairwise_alive 2304
   by type: single 768, pairwise 2304
   requests sha256: <64 lowercase hex digits>
-  cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2)
+  cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2, transient_retries 3)
   cost covers: 3072 Trials; Clips go to: fake
   ceiling: none, committed before: 0 USD
   ```
@@ -185,7 +185,7 @@ Opens the registered Test `TEST`. With `--dry-run`, before anything is sent or s
 5. Takes the exclusive lease on `board.lock` (`fcntl.flock`, held for the rest of the command; the OS releases it if the process dies). If another dispatching command holds it: `study_busy`, nothing written. Under the lease it re-checks that the Test has no Trials (`test_already_open`) and that the registered Test file's SHA-256, the requests digest, the cost estimate and the providers are unchanged since the confirmation (else `test_changed`), nothing written; the ceiling rules are applied again against the committed spend now in `board.db`.
 6. Stores every planned Trial as `planned` (attempt `0`) in one transaction, logs `--ceiling` if given (see [Cost and ceiling](#cost-and-ceiling)), then sends every Trial through the engine.
 
-Per attempt, in this order: (1) the attempt's estimated cost is reserved in the ledger, `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)), all in one transaction, which is refused (nothing written) when the reservation would cross the ceiling (see [Cost and ceiling](#cost-and-ceiling)); (2) the attempt's Clips are prepared (uploaded) for the Rater, only after a successful reservation, and the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the attempt's actual cost, computed from the returned usage, is recorded in the ledger (when the answer has no usage the reservation stands; an attempt with no ledger row, recorded before the ledger existed, gets one reserving its estimate); (7) an answer with category `ok` is parsed and validated against the Instrument's response schema (see [Response validation and retries](#response-validation-and-retries)) and the attempt's `valid`, `invalid_reason` and parsed answer are recorded; (8) the Trial takes its state: a valid answer gives `valid`; an invalid one is retried (the Trial stays `sent` and gets a new attempt through steps 1 to 8) while `attempt <= max_retries`, else gives `invalid`; any other category gives `failed` (never validated, never retried). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
+Per attempt, in this order: (1) the attempt's estimated cost is reserved in the ledger, `attempt` is incremented and the attempt is recorded with its seed (the derived seed for purpose `model` and key `<session_id>:<trial_index>:<attempt>`, see [Seeds](#seeds)), all in one transaction, which is refused (nothing written) when the reservation would cross the ceiling (see [Cost and ceiling](#cost-and-ceiling)); (2) the attempt's Clips are prepared (uploaded) for the Rater, only after a successful reservation, and the request is appended to `archive/requests.jsonl`; (3) the Trial is marked `sent`; (4) the request is submitted to the Rater and its handle stored; (5) the answer is collected and appended to `archive/responses.jsonl`; (6) the attempt's actual cost, computed from the returned usage, is recorded in the ledger (when the answer has no usage the reservation stands; an attempt with no ledger row, recorded before the ledger existed, gets one reserving its estimate); (7) the result's category (one of `ok`, `transient`, `refused`, `fatal`, see [Provider failures](#provider-failures)) decides the rest: an answer with category `ok` is parsed and validated against the Instrument's response schema (see [Response validation and retries](#response-validation-and-retries)) and the attempt's `valid`, `invalid_reason` and parsed answer are recorded; a `transient` result is recorded as the attempt's category with `valid` left empty; `refused` and `fatal` results are never validated; (8) the Trial takes its state: a valid answer gives `valid`; an invalid one is retried (the Trial stays `sent` and gets a new attempt through steps 1 to 8) while the Trial's invalid attempts are `<= max_retries`, else gives `invalid`; a `transient` result is retried the same way, after a backoff, while the Trial's transient attempts are `<= session.retry.transient_retries`, else gives `failed` (the attempt keeps category `transient`); `refused` gives `refused` and `fatal` gives `failed` (never validated, never retried). Any other category stops the Run with `adapter_error`, after its response line was archived and its actual cost recorded (the call may have been billed). Each `(trial_id, attempt)` is dispatched at most once. Inside the process a single writer task performs every `board.db` write and Archive append, in order. Each Clip is prepared once per Rater; at most `concurrency` (from `study.yaml`) calls are in flight per provider. The provider's handle is stored even if the Run is stopped while it is being submitted. If an adapter (or anything else) fails, the Run stops: the other Trials are cancelled, and the error is reported as `code: message` (exit `1`): a `ConsortiumError` from the adapter unchanged, any other error as `run_failed: <type>: <message>`; a Rater that returns the wrong number of results is `adapter_error`.
 
 **State after a stopped Run (resume contract).** Every Trial is in one of these states, and `--resume` handles each (see [Resume](#resume)):
 
@@ -194,6 +194,7 @@ Per attempt, in this order: (1) the attempt's estimated cost is reserved in the 
 - `sent` with a handle: submitted; collect it at the same attempt (unless that attempt is already validated, see below).
 - `sent` whose latest attempt is already recorded valid: stopped before its state write; settle it `valid` from the board (no second collect).
 - `sent` whose latest attempt is already recorded invalid (`valid = 0`): stopped between validating an invalid answer and its retry; re-dispatch it with a new attempt (its handle is not collected again).
+- `sent` whose latest attempt is already recorded `transient`: stopped during the backoff before its retry; re-dispatch it with a new attempt at once, with no wait (its handle is not collected again).
 - `sent` without a handle: stopped while submitting (the request is archived); re-dispatch it with a new attempt.
 - terminal (`valid`, `invalid`, `refused`, `failed`): done; it always has its response line.
 
@@ -203,7 +204,7 @@ On success it adds the Trials by state and a cost footer (Study-wide committed s
 test: pilot1 (pilot)
 ...
 requests sha256: <64 lowercase hex digits>
-cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2)
+cost estimate: expected <usd> USD, worst case <usd> USD (max_retries 2, transient_retries 3)
 cost covers: 3072 Trials; Clips go to: fake
 ceiling: 5 USD, committed before: 0 USD
 states: valid 3072
@@ -212,11 +213,13 @@ cost: committed <usd> USD, ceiling 5 USD
 
 If the Run pauses at the ceiling, the summary ends with `paused: ceiling`, and the command exits `1` with `ceiling_reached: ...` on stderr (see [Cost and ceiling](#cost-and-ceiling)).
 
-**Trial states.** `planned` (stored, not yet sent), `sent` (submitted; not necessarily answered), then one of the terminal states `valid`, `invalid`, `refused`, `failed`. Terminal states never change. This version produces `valid`, `invalid` and `failed`.
+**Trial states.** `planned` (stored, not yet sent), `sent` (submitted; not necessarily answered, or waiting out a backoff before a retry), then one of the terminal states `valid`, `invalid`, `refused`, `failed`. Terminal states never change. `refused`: the provider refused the request (a safety refusal, category `refused`); `failed`: a fatal provider error, transient errors past `session.retry.transient_retries`, or an abandoned last allowed attempt (`attempts_exhausted`).
 
-**Fake rater** (`provider: fake`). Deterministic, offline and free. It answers each Item from `random.Random(<attempt seed>)` in the request's Item order: a Likert Item `randint(1, points)`, a pairwise Item one of its options (a position, `A` or `B`), a free-text Item the fixed string `fake answer`. The raw answer is the canonical JSON `{item_id: value}`, which matches the Instrument's response schema. Usage is `{"input_tokens": I, "output_tokens": O}` from the Model's `fake` settings in `study.yaml` (default `0` and `0`), so its cost is priced from `prices.yaml` like any Model's; model build `fake-1`, category `ok`. Its handle carries the answer itself, so it can be collected after a restart.
+**Fake rater** (`provider: fake`). Deterministic, offline and free. It answers each Item from `random.Random(<attempt seed>)` in the request's Item order: a Likert Item `randint(1, points)`, a pairwise Item one of its options (a position, `A` or `B`), a free-text Item the fixed string `fake answer`. The raw answer is the canonical JSON `{item_id: value}`, which matches the Instrument's response schema. Usage is `{"input_tokens": I, "output_tokens": O}` from the Model's `fake` settings in `study.yaml` (default `0` and `0`), so its cost is priced from `prices.yaml` like any Model's; model build `fake-1`, category `ok`. Its handle carries the answer itself (and its category), so it can be collected after a restart.
 
 With `fake.invalid_rate` (`0` to `1`, default `0`) an attempt answers invalidly when `random.Random(<attempt seed>).random() < invalid_rate`, so whether an attempt is invalid is fixed by its seed: the same `study.seed` and `invalid_rate` give the same `invalid` Trials and attempt counts in a fresh Study. Invalid answers rotate with the attempt number: attempt 1, 4, ... is not JSON (`I think it is about a 4.`); attempt 2, 5, ... omits the first Item; attempt 3, 6, ... gives the first Item an out-of-range value (a Likert value `points + 1`, a pairwise choice `C`, an empty free text). The Fake rater never validates; the engine does.
+
+With `fake.transient_rate`, `fake.refusal_rate` and `fake.fatal_rate` (each `0` to `1`, default `0`) it simulates provider failures. Each kind is drawn from its own stream, `random.Random(derive_seed(<attempt seed>, "fake_<kind>", "")).random() < rate` (kinds `fatal`, `refused`, `transient`), checked in the order fatal, refused, transient, then invalid; the first hit decides the attempt's category. A `transient` result's `raw` alternates with the attempt number between a simulated rate limit (odd attempts) and a simulated transport error (even attempts). Every non-`ok` result reports zero usage. So the same `study.seed` and rates give the same final states, attempt categories and attempt counts in a fresh Study, at any `concurrency`.
 
 #### Response validation and retries
 
@@ -234,7 +237,7 @@ With `fake.invalid_rate` (`0` to `1`, default `0`) an attempt answers invalidly 
 | `bad_choice:<item>` | A pairwise string that is not one of the options |
 | `empty_text:<item>` | An empty (or whitespace-only) free-text answer |
 
-**Retries.** The raw answer is always archived first. A valid answer makes the Trial `valid`. An invalid one leaves the Trial `sent` and, while `attempt <= max_retries`, the engine sends a new attempt: `attempt` is incremented, the seed is the derived seed for key `<session_id>:<trial_index>:<attempt>`, the request text is unchanged (same `request_sha256`), and the attempt reserves its cost and can pause at the ceiling like any other (a retry refused by the ceiling leaves the Trial `sent` for `--resume`). An invalid answer with no retries left makes the Trial `invalid`. `max_retries` is the Test's effective `session.max_retries` (the Test's `session.max_retries`, else `study.yaml`'s, default `2`), so a Trial has at most `1 + max_retries` attempts; with `max_retries: 0` the first invalid answer is final. Retries are sequential per Trial: attempt `n+1` is sent only after attempt `n` was collected and found invalid. A Trial never gets more than `1 + max_retries` attempts, also across a resume. When a resumed Trial has already used them all, it is settled from the board without another attempt: `invalid` if its last attempt was recorded invalid; `failed`, with category `attempts_exhausted`, if its last attempt was abandoned before it was answered (a crash during the last allowed attempt). Such a `failed` Trial is not an invalid answer: it is outside the invalid-answer rate and counted with `failed`. So a resumed Run can differ from an uninterrupted one only for Trials whose last allowed attempt was interrupted. A Trial whose latest attempt was already recorded valid (stopped before its state was written) is settled `valid` from the board, without collecting it again. Abandoned attempts keep their attempt row (and possibly a request line) but have no response line. Refused and failed answers are never retried.
+**Retries.** The raw answer is always archived first. A valid answer makes the Trial `valid`. An invalid one leaves the Trial `sent` and, while the Trial's invalid attempts (attempts recorded with `valid = 0`) are `<= max_retries`, the engine sends a new attempt: `attempt` is incremented, the seed is the derived seed for key `<session_id>:<trial_index>:<attempt>`, the request text is unchanged (same `request_sha256`), and the attempt reserves its cost and can pause at the ceiling like any other (a retry refused by the ceiling leaves the Trial `sent` for `--resume`). An invalid answer with no retries left makes the Trial `invalid`. `max_retries` is the Test's effective `session.max_retries` (the Test's `session.max_retries`, else `study.yaml`'s, default `2`), with `max_retries: 0` the first invalid answer is final. Transient results have their own budget (`session.retry.transient_retries`, see [Provider failures](#provider-failures)); both budgets are counted from the Trial's `attempts` rows, never from the attempt number, so a transient result never uses up an invalid-answer retry and the other way round. Retries are sequential per Trial: attempt `n+1` is sent only after attempt `n` was collected. A Trial never gets more than `1 + max_retries + transient_retries` attempts (the hard cap, abandoned attempts included), also across a resume. When a resumed Trial has spent a budget or reached the cap, it is settled from the board without another attempt: `invalid` if its last attempt was recorded invalid (and its invalid attempts exceed `max_retries`, or it is at the cap); `failed`, keeping category `transient`, if its last attempt was recorded transient (and its transient attempts exceed `transient_retries`, or it is at the cap); `failed`, with category `attempts_exhausted`, if at the cap its last attempt was abandoned before it was answered (a crash during the last allowed attempt). Such a `failed` Trial is not an invalid answer: it is outside the invalid-answer rate and counted with `failed`. So a resumed Run can differ from an uninterrupted one only for Trials whose last allowed attempt was interrupted. A Trial whose latest attempt was already recorded valid (stopped before its state was written) is settled `valid` from the board, without collecting it again. Abandoned attempts keep their attempt row (and possibly a request line) but have no response line. Refused and fatal results are never retried.
 
 **The answer** of a Trial is its **highest valid attempt** (a query, `board.trials.chosen_answer`, not a stored pointer).
 
@@ -252,6 +255,30 @@ With `fake.invalid_rate` (`0` to `1`, default `0`) an attempt answers invalidly 
 | 3 invalid attempts, `max_retries: 2` | `invalid`; no 4th attempt |
 | `max_retries: 0`, first attempt invalid | `invalid` at once |
 | Stopped after attempt 2's request was archived, before it was sent | `--resume` sends attempt 3 with a new seed; attempt 2 is never sent or collected |
+
+#### Provider failures
+
+Every Rater result has exactly one category (AD-6): `ok` (an answer, validated as above), `transient` (a rate limit or transport error), `refused` (a safety refusal) or `fatal` (any other provider error). Adapters never raise for a provider outcome: an error at submit time goes into the handle and `collect` returns its category; `raw` holds the provider text or an error summary (never a secret). Adapters never sleep or back off; the engine does. Any other category stops the Run with `adapter_error`, after its response line was archived and its actual cost recorded (the call may have been billed). The raw response is always archived and its actual cost recorded first.
+
+- `refused`: the Trial becomes `refused`. Never validated, never retried. The refusing attempt is never validated; earlier attempts of the same Trial may have been recorded invalid before it.
+- `fatal`: the Trial becomes `failed` (attempt category `fatal`).
+- `transient`: the attempt is recorded with category `transient` and `valid` empty, and the Trial stays `sent`. After a backoff it gets a new attempt through the same steps 1 to 8 (attempt incremented, new seed, same request text, its own reservation and ceiling check; a retry refused by the ceiling leaves the Trial `sent` and pauses the Run). Once the Trial has had more than `session.retry.transient_retries` transient attempts it becomes `failed` and the attempt keeps category `transient`.
+
+**Backoff.** After the Trial's k-th transient attempt the engine waits `min(backoff_max_s, backoff_initial_s × 2^(k−1)) × u` seconds, where `u = random.Random(derive_seed(<attempt seed>, "backoff", "")).uniform(0.5, 1.0)`, a deterministic jitter in [0.5, 1.0]. The provider's concurrency slot is not held while waiting. A ceiling pause wakes every Trial waiting out a backoff at once: it starts no new attempt and stays `sent` for `--resume`. On `--resume` a Trial whose latest attempt was recorded `transient` gets its new attempt at once, without waiting.
+
+The worst-case cost estimate is `expected × (1 + max_retries + transient_retries)` (see [Cost and ceiling](#cost-and-ceiling)); each transient retry also reserves and is checked against the ceiling one attempt at a time.
+
+| Situation | Result |
+| --- | --- |
+| Attempt 1 transient, attempt 2 valid | `valid`; two request and two response lines; attempt 1 category `transient` |
+| `transient_retries: 3`, 4 transient attempts | `failed`; no 5th attempt |
+| `transient_retries: 0`, first attempt transient | `failed` at once |
+| Category `refused` | `refused`; not validated; no retry |
+| Category `fatal` | `failed`, category `fatal` |
+| `max_retries: 1`: invalid, transient, invalid | `invalid` after attempt 3 |
+| Stopped during a backoff (latest attempt recorded `transient`) | `--resume` sends a new attempt at once; the old handle is not collected |
+| The reservation of a transient retry would cross the ceiling | The Trial stays `sent`; the Run pauses at `ceiling` |
+| A Rater returns category `oops` | The Run stops: `adapter_error` |
 
 | Situation | Result |
 | --- | --- |
@@ -282,9 +309,9 @@ With `fake.invalid_rate` (`0` to `1`, default `0`) an attempt answers invalidly 
 6. Runs the **re-issue check** (below); a mismatch is `reissue_mismatch`, nothing written.
 7. Prints `resume: collect C, new attempt A, settled S, terminal T, archive fragments F` (S = Trials settled from the board without dispatch, see [Response validation and retries](#response-validation-and-retries); F = crash fragments skipped in the two Archive files), settles those Trials, logs `--ceiling` if given, then sends the non-terminal Trials through the engine (each new attempt reserves as in a Run; a collected attempt was reserved when it was sent):
    - terminal (`valid`, `invalid`, `refused`, `failed`): untouched, never re-sent;
-   - settled (latest attempt recorded valid: `valid`; all `1 + max_retries` attempts used: `invalid` or `failed`): its state is written, nothing is sent or collected;
-   - `sent` whose latest attempt has a stored handle and is not yet validated: collected at that same attempt (steps 5 to 8 only, then retried if invalid with retries left: no new attempt, no new request line); its response line carries the archived `request_sha256` (a stored handle that is not a JSON object stops the resume with `adapter_error: stored handle unreadable for <trial_id>`);
-   - `planned` (attempt `0`, or `>= 1` after a stop between recording the attempt and marking it `sent`), `sent` without a handle, and `sent` whose latest attempt is already recorded invalid: a new attempt (steps 1 to 8, new seed, same request text, new request line). Attempt numbers are never reused, and an attempt that was never marked `sent` is never collected.
+   - settled (latest attempt recorded valid: `valid`; a spent budget or the `1 + max_retries + transient_retries` cap: `invalid` or `failed`): its state is written, nothing is sent or collected;
+   - `sent` whose latest attempt has a stored handle and no recorded outcome yet (not validated, not recorded `transient`): collected at that same attempt (steps 5 to 8 only, then retried if invalid or transient with its budget left: no new attempt, no new request line); its response line carries the archived `request_sha256` (a stored handle that is not a JSON object stops the resume with `adapter_error: stored handle unreadable for <trial_id>`);
+   - `planned` (attempt `0`, or `>= 1` after a stop between recording the attempt and marking it `sent`), `sent` without a handle, and `sent` whose latest attempt is already recorded invalid or `transient`: a new attempt (at once, no backoff) (steps 1 to 8, new seed, same request text, new request line). Attempt numbers are never reused, and an attempt that was never marked `sent` is never collected.
 
    The Test's pause (`paused_reason`) is cleared only when the resume ends without pausing again.
 
@@ -300,10 +327,10 @@ It ends like a Run: Trials by state and the cost footer, exit `0` (with the `war
 
 USD amounts are exact decimals, stored and printed as decimal strings (no exponent, trailing zeros dropped: `5.00` prints as `5`).
 
-**Estimate.** `expected` is the sum of that cost over every Trial the open would send (all planned Trials for a Run or dry run, covering both pairwise orders, every Repeat and the Practice clips; the non-terminal Trials for `--resume`). `worst_case` = `expected` × (1 + `max_retries`), with the Test's effective `session.max_retries`. Both are printed side by side with the number of Trials and the providers that will receive Clips:
+**Estimate.** `expected` is the sum of that cost over every Trial the open would send (all planned Trials for a Run or dry run, covering both pairwise orders, every Repeat and the Practice clips; the non-terminal Trials for `--resume`). `worst_case` = `expected` × (1 + `max_retries` + `transient_retries`), every Trial taking its maximum number of attempts, with the Test's effective `session.max_retries` and `study.yaml`'s `session.retry.transient_retries`. Both are printed side by side with the number of Trials and the providers that will receive Clips:
 
 ```text
-cost estimate: expected 0.4183 USD, worst case 1.2549 USD (max_retries 2)
+cost estimate: expected 0.4183 USD, worst case 2.5098 USD (max_retries 2, transient_retries 3)
 cost covers: 256 Trials; Clips go to: fake
 ceiling: 5 USD, committed before: 0 USD
 ```
@@ -416,7 +443,9 @@ pilot1  m1     p2-m1        4        0     0      3        1        0       0   
 committed 0 / ceiling none   state: ok
 ```
 
-`--json` prints, instead of the table, one JSON object `{"schema_version": 1, "test": "<TEST>" | null, "rows": [...], "committed": "<USD>", "ceiling": "<USD>" | null, "state": "ok" | "paused", "paused": [{"test": "<name>", "reason": "<reason>"}, ...]}`. `test` echoes the `TEST` filter (`null` without one); `paused` lists every paused Test of the Study by name (empty when `state` is `ok`). Each row has the columns above as keys, counts as integers, `invalid_rate` as a number or `null`, `cost_usd` as a decimal string, `paused` as a string or `null`.
+`--json` prints, instead of the table, one JSON object `{"schema_version": 1, "test": "<TEST>" | null, "rows": [...], "committed": "<USD>", "ceiling": "<USD>" | null, "state": "ok" | "paused", "paused": [{"test": "<name>", "reason": "<reason>"}, ...], "by_persona_attribute": {...} | null}`. `test` echoes the `TEST` filter (`null` without one); `paused` lists every paused Test of the Study by name (empty when `state` is `ok`). Each row has the columns above as keys, counts as integers, `invalid_rate` as a number or `null`, `cost_usd` as a decimal string, `paused` as a string or `null`.
+
+`by_persona_attribute` (story 2.1) shows differential attrition per Persona attribute: `{"<test>": {"persona_<field>": {"<value>": {"trials": n, "invalid": n, "refused": n, "failed": n, "failed_fatal": n, "failed_transient": n, "failed_exhausted": n}}}}` for every listed Test (the counts are those of the [Attrition](#attrition) sidecar), with the export's `persona_*` column names in export column order (values in natural Persona order of first appearance; a Test never opened has every attribute with `{}`). It is `null` when the Panel cannot be loaded (`panel_missing` or `panel_invalid`) or lacks a Persona of the Trials; the rest of the status still works. New keys are additive: `schema_version` stays `1`. It never holds a Condition, and the text table is unchanged. Refusals and failures per Model and Agent are the rows' `refused` and `failed` columns.
 
 | Situation | Result |
 | --- | --- |
@@ -432,13 +461,13 @@ committed 0 / ceiling none   state: ok
 
 ### `consortium export TEST [--study PATH]`
 
-Writes `exports/<TEST>.csv`, a tidy CSV for analysis in R or Python, and prints its path on stdout. Conditions are joined from `blinding_key.csv` at this moment only (they never enter `board.db`, the Archive or the logs).
+Writes `exports/<TEST>.csv`, a tidy CSV for analysis in R or Python, plus its attrition sidecar `exports/<TEST>-attrition.csv` (see [Attrition](#attrition)), and prints the CSV's path on stdout. Conditions are joined from `blinding_key.csv` at this moment only (they never enter `board.db`, the Archive or the logs).
 
-`export` only reads: like `status` it opens `board.db` read-only in one read transaction, never takes the `board.lock` lease (so it works while another Test is dispatching) and writes nothing but the CSV (to a uniquely named temporary file in `exports/`, fsynced, renamed over any previous export, then the `exports/` folder is fsynced). `board.db`, `archive/` and `blinding_key.csv` stay byte-for-byte unchanged. Exporting the same state twice gives identical bytes. One file per Test; Tests are never mixed.
+`export` only reads: like `status` it opens `board.db` read-only in one read transaction, never takes the `board.lock` lease (so it works while another Test is dispatching) and writes nothing but the CSV and its sidecar (each to a uniquely named temporary file in `exports/`, fsynced, renamed over any previous export, then the `exports/` folder is fsynced). `board.db`, `archive/` and `blinding_key.csv` stay byte-for-byte unchanged. Exporting the same state twice gives identical bytes. One file per Test; Tests are never mixed.
 
 It refuses unless every Trial of the Test is terminal (`valid`, `invalid`, `refused` or `failed`): any `planned` or `sent` Trial (a Run in progress, stopped or paused) gives `sessions_running`. It also checks that every stored Persona card `panel/personas/p<n>.md` still equals the card regenerated from `index.json` and the built-in wording (`panel_mismatch` otherwise).
 
-Order of checks: the `board.db` checks, then the Panel and Instrument checks; only then is `blinding_key.csv` read (once), followed by the Condition-column checks (`condition_name_clash`) and the stored-answer checks (`instrument_changed`, `board_unreadable`). A refusal at any step writes no file.
+Order of checks: the `board.db` checks, then the Panel and Instrument checks; only then is `blinding_key.csv` read (once), followed by the Condition-column checks (`condition_name_clash`) and the stored-answer checks (`instrument_changed`, `board_unreadable`). A refusal at any step writes no file (neither the CSV nor the sidecar).
 
 **Rows.** One row per Item per Trial, so every Trial has at least one row: ordered by `session_id` (natural order, so `p2` before `p10`), then `trial_index`, then the Instrument's Item order. A `valid` Trial exports the answer of its highest valid attempt. Every other Trial (`invalid`, `refused`, `failed`) exports the same rows with `response` **empty** and `status` set: an empty `response` always means "no valid answer", never a value. Practice clips and their intended answers never appear. The tool computes no exclusions and no statistics.
 
@@ -472,6 +501,19 @@ Order of checks: the `board.db` checks, then the Panel and Instrument checks; on
 | `timestamp` | When the exported attempt was answered (else sent), UTC ISO 8601 with milliseconds and `Z`; empty if none. |
 
 UTF-8, `\n` line endings, standard CSV quoting (Python `csv`), header row first.
+
+#### Attrition
+
+`exports/<TEST>-attrition.csv` (story 2.1) makes differential attrition visible: Trial counts by outcome per Model, per Persona attribute, per Condition and per Instrument. Columns `schema_version,dimension,attribute,value,trials,invalid,refused,failed,failed_fatal,failed_transient,failed_exhausted`, one row per value:
+
+| `dimension` | `attribute` | `value` |
+| --- | --- | --- |
+| `model` | `model_id` | The Model ID |
+| `persona` | The `persona_<field>` column name (export column order) | The Persona's value |
+| `condition` | The Condition column name of the tidy CSV (`<factor>`, `<factor>_a`, `<factor>_b`) | The level, empty where the tidy CSV cell is empty |
+| `instrument` | `instrument` | The Instrument name |
+
+`schema_version` is `1` on every row. `trials` counts Trials (not Item rows); `invalid`, `refused` and `failed` count Trials in that state. `failed` is the total of `failed_fatal` (category `fatal`, or any other or none recorded on the last attempt), `failed_transient` (transient budget spent) and `failed_exhausted` (`attempts_exhausted`). Rows are in that dimension order, then attribute order, then value as first seen in the tidy CSV. For every attribute the `trials` sum to the Test's Trials. Same encoding as the tidy CSV; the tidy CSV itself is unchanged. Both files are written together: each to its temporary file (fsynced), then both renamed, then the folder fsynced. Conditions appear here (and in the tidy CSV) only, never in `status`.
 
 Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@`. A spreadsheet may run such a cell as a formula: import the file as text, or analyse it in R or Python.
 
@@ -515,7 +557,7 @@ Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
 | `panel_missing` | any command that needs Personas (`open`, `export`) | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
 | `panel_invalid` | any command that needs Personas (`open`, `export`) | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing (or, for `export`, unreadable). |
-| `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
+| `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`, is longer than 64 characters, or ends in `-attrition`. |
 | `test_changed` | `push test`, `open` | The Test file changed while it was being validated, or (for a Run or `--resume`) the Test file, its requests, its non-terminal Trials or its providers changed between the confirmation and the lease; nothing was registered, planned or stored. |
 | `test_exists` | `push test`, `open` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
 | `unknown_clip` | `push test`, `open` | A target Clip ID is not in `board.db` (field `clips[i]`), or a Clip a registered Test uses is missing when its Trials are rendered. |
@@ -542,7 +584,7 @@ Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@
 | `test_not_open` | `open --resume` | The Test has no Trials in `board.db`; open it without `--resume` first. |
 | `reissue_mismatch` | `open --resume` | An archived request no longer re-renders byte-identically from its Trial row and the Study folder (a Study input was edited after open), or its `request_sha256`, seed or Model does not match; nothing was sent. |
 | `run_failed` | `open` | The Run stopped on an unexpected error (`<type>: <message>`); see the resume contract under [Run](#run). |
-| `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results), or `--resume` found a stored handle that is not a JSON object. The Run stopped. |
+| `adapter_error` | `open` | A Rater broke the port contract (for example returned the wrong number of results, or a category other than `ok`, `transient`, `refused`, `fatal`), or `--resume` found a stored handle that is not a JSON object. The Run stopped. |
 | `bad_concurrency` | `open` | The engine was given a concurrency below 1 (an internal check; `study.yaml` already requires at least 1). |
 | `bad_max_retries` | `open` | The engine was given `max_retries` below 0 (an internal check; the config already requires at least 0). |
 | `sessions_running` | `export` | A Trial of the Test is still `planned` or `sent` (`<n> Trials not terminal`); finish or resume the Run first. Nothing was written. |
@@ -570,7 +612,7 @@ Free-text responses are exported verbatim and may start with `=`, `+`, `-` or `@
   board.lock           Exclusive lease held by a dispatching command.               (open)
   archive/requests.jsonl   Append-only rendered requests.                           (open)
   archive/responses.jsonl  Append-only raw responses.                               (open)
-  exports/             <test>.csv from export; leak-report.csv from push clip.      (export, push clip)
+  exports/             <test>.csv and <test>-attrition.csv from export; leak-report.csv from push clip.      (export, push clip)
   protocol.lock        Hashes of every file that affects the data.                  (arrives in story 4.1)
 ```
 
@@ -631,7 +673,7 @@ Table `test_clips` (version 2), one row per Test and Clip it uses: `test`, `clip
 
 Table `trials` (version 3), one row per planned Trial, written by `open`: every Trial field (`trial_id` primary key, `test`, `session_id`, `trial_index`, `instrument`, `clip_ids` as a canonical JSON list in presentation order, `pair_id`, `position`, `prompt_variant`, `order_seed`, `repeat`, `agent_id`, `persona_id`, `model_id`), plus `state` (see [Trial states](#run)), `attempt` (`0` until first dispatched, then the latest attempt number) and `seq` (plan order).
 
-Table `attempts` (version 3), one row per `(trial_id, attempt)` (primary key): `seed` (the attempt's derived Model seed), `handle` (the Rater's handle as canonical JSON, once submitted), `sent_at`, `answered_at` (UTC ISO 8601 with milliseconds and `Z`) and `category` (the Rater's result category, `ok` or a snake_case reason). Indexed by `trial_id`. Columns added in version 5: `valid` (`1` or `0` once the answer was validated, empty before and for a category other than `ok`), `invalid_reason` (the `invalid_response` reason of an invalid attempt) and `answer_json` (a valid attempt's parsed answer `{item_id: value}` as canonical JSON). An abandoned last allowed attempt (never answered) that ended its Trial `failed` on resume has category `attempts_exhausted`.
+Table `attempts` (version 3), one row per `(trial_id, attempt)` (primary key): `seed` (the attempt's derived Model seed), `handle` (the Rater's handle as canonical JSON, once submitted), `sent_at`, `answered_at` (UTC ISO 8601 with milliseconds and `Z`) and `category` (the Rater's result category: `ok`, `transient`, `refused` or `fatal`; or `attempts_exhausted`, see below). Indexed by `trial_id`. Columns added in version 5: `valid` (`1` or `0` once the answer was validated, empty before and for a category other than `ok`), `invalid_reason` (the `invalid_response` reason of an invalid attempt) and `answer_json` (a valid attempt's parsed answer `{item_id: value}` as canonical JSON). An abandoned last allowed attempt (never answered) that ended its Trial `failed` on resume has category `attempts_exhausted`.
 
 Table `ledger` (version 4), one row per `(trial_id, attempt)` (primary key) that was reserved: `model_id`, `reserved_usd` (the attempt's estimated cost, written in the same transaction as its `attempts` row) and `actual_usd` (from the returned usage; empty until known, or when the answer had no usage). USD as decimal strings.
 
@@ -661,6 +703,10 @@ The only place Conditions exist. Long CSV with header `clip_id,factor,level`, on
 ### `exports/<test>.csv`
 
 Written only by `consortium export` (see [the command](#consortium-export-test---study-path) for every column). Replaced whole on each export; never mixes Tests.
+
+### `exports/<test>-attrition.csv`
+
+Written by `consortium export` next to `exports/<test>.csv`: Trial counts by outcome per Model, Persona attribute, Condition and Instrument (see [Attrition](#attrition)). Test names ending in `-attrition` are refused (`bad_test_name`), so a sidecar never collides with another Test's CSV.
 
 ### `exports/leak-report.csv`
 
@@ -695,12 +741,13 @@ All values below are what `init` writes. Fields marked *required* have no defaul
 | `models[].model` | *Required.* The model version to call (template: `fake-1`). Refused: an empty or blank name, and any name ending in `latest` (case-insensitive, for example `gemini-latest`). No other check is made that the name is pinned. |
 | `models[].settings.temperature` | > 0; template `0.7`. |
 | `models[].max_output_tokens` | *Required.* Integer > 0; template `512`. |
-| `models[].fake` | Fake rater settings, only for `provider: fake` (on another provider: `config_invalid`, field `models.<i>`): `input_tokens` and `output_tokens` (integers >= 0, template and default `0`), the usage it reports for every answer; `invalid_rate` (a number from `0` to `1`, template and default `0`), the share of attempts it answers invalidly, decided per attempt seed (see [Run](#run)). |
+| `models[].fake` | Fake rater settings, only for `provider: fake` (on another provider: `config_invalid`, field `models.<i>`): `input_tokens` and `output_tokens` (integers >= 0, template and default `0`), the usage it reports for every answer; `invalid_rate` (a number from `0` to `1`, template and default `0`), the share of attempts it answers invalidly, decided per attempt seed (see [Run](#run)); `transient_rate`, `refusal_rate` and `fatal_rate` (each a number from `0` to `1`, template and default `0`), the share of attempts that simulate a transient error, a refusal or a fatal error, each decided per attempt seed from its own stream (see [Run](#run)). |
 | `models[].limits` | *Required.* What the Model accepts per request: `max_seconds` (> 0, template `600`), `max_bytes` (integer > 0, template `20000000`), `inline_base64` (template `true`; media is sent base64-inline, which counts 4/3 of the file size). |
 | `media` | Canonical Clip encoding: `height` 480 (must be even), `video_kbps` 400, `audio_kbps` 64, `fps` 25. |
 | `session.practice_clips` | Practice examples included per Trial per Instrument (>= 0); template `2`. |
 | `session.repeats` | Repeats per Agent (>= 1); template `3`. |
-| `session.max_retries` | Retries after an invalid answer (>= 0); template and default `2`. A Trial gets at most `1 + max_retries` attempts (see [Response validation and retries](#response-validation-and-retries)). |
+| `session.max_retries` | Retries after an invalid answer (>= 0); template and default `2`. Counted separately from transient retries (see [Response validation and retries](#response-validation-and-retries)). |
+| `session.retry` | Retries after a `transient` result (see [Provider failures](#provider-failures)); `study.yaml` only, no per-Test override. `transient_retries` (integer >= 0, template and default `3`), `backoff_initial_s` (finite, >= 0, template and default `2`), `backoff_max_s` (finite, >= `backoff_initial_s`, template and default `60`; else `config_invalid`, field `session.retry`: `backoff_max_s must be at least backoff_initial_s`). A Trial gets at most `1 + max_retries + transient_retries` attempts. |
 | `session.pairing` | Pairing rule for pairwise Instruments; only `all_pairs` is accepted. |
 | `concurrency` | Max in-flight calls per provider (>= 1); template `4`. |
 | `thresholds` | *Required*, every key, no code defaults: `persona_fidelity_min` (0-1, template `0.8`), `invalid_rate_max` (0-1, template `0.05`), `leak_tolerance.duration_s` (template `1.0`), `leak_tolerance.loudness_lufs` (template `2.0`). Resolution and fps must match exactly. |
@@ -739,7 +786,7 @@ Every sentence and phrase must be a single line (no line break of any kind, incl
 | `models` | Optional list of Model ids from `study.yaml`; omitted means every Model. |
 | `clips` | Target Clip IDs, each `c_` plus 8 lowercase base32 characters, unique (default `[]`; existence is checked by `push test`). |
 | `practice` | Practice examples (default `[]`): each `{instrument, clips, answer}`. `instrument` must be one of the Test's `instruments` (else `unknown_instrument`, field `practice.<i>.instrument`); `clips` is exactly 1 Clip ID, or 2 for a pairwise Instrument; `answer` maps Item id to the intended value and must pass the Instrument's response schema (else `config_invalid`, field `practice.<i>.clips` or `practice.<i>.answer.<item>`). Each Instrument needs at least `session.practice_clips` examples; the first ones in list order are used (count and Clip existence checked by `push test`, `bad_practice`). Practice clips may be shared between pilot and main Tests. |
-| `session` | Optional overrides of any `study.yaml` `session` key (`practice_clips`, `repeats`, `max_retries`, `pairing`). |
+| `session` | Optional overrides of these `study.yaml` `session` keys: `practice_clips`, `repeats`, `max_retries`, `pairing` (not `retry`). |
 
 Prompt variants are not chosen in the Test; they rotate by Repeat (see [Sessions and Trials](#sessions-and-trials)).
 

@@ -284,7 +284,8 @@ def test_reexport_identical_bytes(study: Path) -> None:
     first = export_test(study, "pilot1").read_bytes()
     assert first != b"old"
     assert export_test(study, "pilot1").read_bytes() == first
-    assert sorted(p.name for p in path.parent.iterdir()) == ["pilot1.csv"]  # no temp left
+    # no temp left
+    assert sorted(p.name for p in path.parent.iterdir()) == ["pilot1-attrition.csv", "pilot1.csv"]
 
 
 def test_while_other_test_dispatching(study: Path) -> None:
@@ -300,7 +301,8 @@ def test_read_only(study: Path) -> None:
     assert _cli(study, "pilot2").exit_code == 1
     assert _snapshot(study) == before
     assert sorted(p.name for p in study.iterdir()) == sorted({*files, "exports"})
-    assert sorted(p.name for p in (study / "exports").iterdir()) == ["pilot1.csv"]
+    assert sorted(p.name for p in (study / "exports").iterdir()) == [
+        "pilot1-attrition.csv", "pilot1.csv"]
 
 
 # --------------------------------------------------------------------------- refusals
@@ -559,3 +561,117 @@ def test_bad_clip_ids_length(study: Path) -> None:
           (json.dumps([t["clip_ids"][0]]), t["trial_id"]))
     result = _cli(study, "pilot1")
     assert result.exit_code == 1 and result.stderr.startswith("board_unreadable: ")
+
+
+# --------------------------------------------------------------------------- attrition (2.1)
+
+ATTRITION_HEADER = [
+    "schema_version", "dimension", "attribute", "value", "trials", "invalid", "refused",
+    "failed", "failed_fatal", "failed_transient", "failed_exhausted",
+]
+
+
+def _expected_attrition(
+    header: list[str], rows: list[dict[str, str]], kinds: dict[tuple[str, str], str]
+) -> list[list[str]]:
+    """The sidecar recomputed from the tidy CSV: one Trial per (session_id, trial_index).
+
+    ``kinds`` maps a failed Trial's key to its ``failed_*`` column (default fatal).
+    """
+    trials: dict[tuple[str, str], dict[str, str]] = {}
+    for r in rows:
+        trials.setdefault((r["session_id"], r["trial_index"]), r)
+    conditions = header[header.index("model") + 1:header.index("instrument")]
+    blocks = [("model", "model_id", "model"),
+              *(("persona", c, c) for c in PERSONA_COLUMNS),
+              *(("condition", c, c) for c in conditions),
+              ("instrument", "instrument", "instrument")]
+    out = []
+    for dimension, attribute, column in blocks:
+        tally: dict[str, dict[str, int]] = {}
+        for key, r in trials.items():
+            acc = tally.setdefault(r[column], dict.fromkeys(ATTRITION_HEADER[4:], 0))
+            acc["trials"] += 1
+            if r["status"] in ("invalid", "refused", "failed"):
+                acc[r["status"]] += 1
+            if r["status"] == "failed":
+                acc[kinds.get(key, "failed_fatal")] += 1
+        out.extend(["1", dimension, attribute, value, *map(str, acc.values())]
+                   for value, acc in tally.items())
+    return out
+
+
+def test_attrition_sidecar(study: Path) -> None:
+    trials = _trials(study, "pilot1")
+    for t in trials[:6]:
+        _exec(study, "UPDATE trials SET state = 'refused' WHERE trial_id = ?", (t["trial_id"],))
+    failed = trials[100:103]
+    for t in failed:
+        _exec(study, "UPDATE trials SET state = 'failed' WHERE trial_id = ?", (t["trial_id"],))
+    for t, category in zip(failed[1:], ("transient", "attempts_exhausted"), strict=True):
+        _exec(study, "UPDATE attempts SET category = ? WHERE trial_id = ? AND attempt = ?",
+              (category, t["trial_id"], t["attempt"]))
+    kinds = {(t["session_id"], str(t["trial_index"])): k for t, k in
+             zip(failed, ("failed_fatal", "failed_transient", "failed_exhausted"), strict=True)}
+    path = export_test(study, "pilot1")
+    sidecar = study / "exports" / "pilot1-attrition.csv"
+    assert export_stage.attrition_path(study, "pilot1") == sidecar
+    header, rows = _read(path)
+    text = sidecar.read_bytes().decode("utf-8")
+    got = list(csv.reader(io.StringIO(text, newline="")))
+    assert got[0] == ATTRITION_HEADER
+    assert got[1:] == _expected_attrition(header, rows, kinds)
+    dims = [r[1] for r in got[1:]]
+    assert dims == sorted(dims, key=["model", "persona", "condition", "instrument"].index)
+    assert {r[2] for r in got[1:] if r[1] == "condition"} == {
+        "embodiment", "embodiment_a", "embodiment_b", "speed", "speed_a", "speed_b"}
+    assert [r[3] for r in got[1:] if r[1] == "instrument"] == ["godspeed", "pairwise_alive"]
+    invalid = sum(t["state"] == "invalid" for t in _trials(study, "pilot1"))
+    assert invalid > 0
+    model = next(r for r in got[1:] if r[1] == "model")
+    assert model == ["1", "model", "model_id", "m1", str(len(trials)), str(invalid), "6", "3",
+                     "1", "1", "1"]
+    persona_attrs = list(dict.fromkeys(r[2] for r in got[1:] if r[1] == "persona"))
+    assert persona_attrs == PERSONA_COLUMNS
+    for attribute in {r[2] for r in got[1:]}:
+        mine = [r for r in got[1:] if r[2] == attribute]
+        assert sum(int(r[4]) for r in mine) == len(trials)
+        assert [sum(int(r[i]) for r in mine) for i in range(5, 11)] == [invalid, 6, 3, 1, 1, 1]
+    assert export_test(study, "pilot1") == path  # re-export: identical bytes
+    assert sidecar.read_bytes().decode("utf-8") == text
+
+
+def test_export_writes_both_or_neither(study: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure while writing the second temp file leaves no target and no temp file."""
+    real = export_stage.os.fsync
+    calls = {"n": 0}
+
+    def flaky(fd: int) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the sidecar's temp file
+            raise OSError("disk full")
+        real(fd)
+
+    monkeypatch.setattr(export_stage.os, "fsync", flaky)
+    with pytest.raises(OSError):
+        export_test(study, "pilot1")
+    assert list((study / "exports").iterdir()) == []
+
+
+def test_attrition_sidecar_single_and_no_conditions(study: Path) -> None:
+    (study / blinding.KEY_FILE).unlink()
+    export_test(study, "single")
+    got = list(csv.reader(io.StringIO(
+        (study / "exports" / "single-attrition.csv").read_text(), newline="")))
+    assert got[0] == ATTRITION_HEADER
+    assert {r[1] for r in got[1:]} == {"model", "persona", "instrument"}
+
+
+def test_attrition_not_written_on_refusal(study: Path) -> None:
+    trial_id = _trials(study, "pilot1")[0]["trial_id"]
+    _exec(study, "UPDATE trials SET state = 'sent' WHERE trial_id = ?", (trial_id,))
+    with pytest.raises(ConsortiumError) as info:
+        export_test(study, "pilot1")
+    assert info.value.code == "sessions_running"
+    assert not (study / "exports" / "pilot1-attrition.csv").exists()
+    assert not (study / "exports" / "pilot1.csv").exists()

@@ -10,13 +10,20 @@ settings only and never change the request text.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, get_args
 
 from consortium.core.render import ClipRef, TrialRequest
 
 # A handle is JSON-serialisable (stored as canonical JSON text in ``attempts.handle``),
 # so ``collect`` can be called with it after a restart.
 Handle = dict[str, Any]
+
+# AD-6: every provider outcome is exactly one of these. ``ok``: an answer (validated by
+# the engine); ``transient``: a rate limit or transport error (retried with backoff);
+# ``refused``: a safety refusal (terminal, never validated or retried); ``fatal``: any
+# other provider error (the Trial fails). Adapters never raise for a provider outcome.
+Category = Literal["ok", "transient", "refused", "fatal"]
+CATEGORIES: tuple[str, ...] = get_args(Category)
 
 
 @dataclass(frozen=True)
@@ -41,12 +48,16 @@ class RaterCall:
 
 @dataclass(frozen=True)
 class RaterResult:
-    """The raw answer of one attempt. ``category`` is ``"ok"`` or a snake_case failure reason."""
+    """The raw answer of one attempt and its ``Category``.
+
+    ``raw`` is the provider text, or an error summary for a non-``ok`` result (never a
+    secret). An error at submit time goes into the handle; ``collect`` returns it.
+    """
 
     raw: str
     usage: dict[str, int]  # {input_tokens, output_tokens}
     model_build: str | None
-    category: str
+    category: Category
 
 
 class Rater(Protocol):

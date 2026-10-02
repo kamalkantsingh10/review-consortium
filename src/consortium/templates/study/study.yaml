@@ -24,6 +24,9 @@ models:
       input_tokens: 0
       output_tokens: 0
       invalid_rate: 0       # 0-1: share of attempts answered invalidly (seeded per attempt)
+      transient_rate: 0     # 0-1: share of attempts that hit a simulated rate limit / transport error
+      refusal_rate: 0       # 0-1: share of attempts that are refused (Trial ends refused)
+      fatal_rate: 0         # 0-1: share of attempts that fail fatally (Trial ends failed)
 
 # Canonical media profile every Clip is re-encoded to at ingest.
 media:
@@ -37,6 +40,10 @@ session:
   repeats: 3
   max_retries: 2
   pairing: all_pairs
+  retry:                    # rate limits and transport errors (study.yaml only)
+    transient_retries: 3    # retries after a transient error, separate from max_retries
+    backoff_initial_s: 2    # first wait; doubles per transient attempt, with seeded jitter
+    backoff_max_s: 60       # cap on one wait (>= backoff_initial_s)
 
 # Max in-flight calls per provider.
 concurrency: 4

@@ -664,3 +664,81 @@ def test_prices_schema_forbids_other_keys() -> None:
 
     schema = json.loads((REPO / "docs" / "schema" / "prices.schema.json").read_text())
     assert schema["properties"]["models"]["additionalProperties"] is False
+
+
+# --------------------------------------------------------------------------- story 2.1
+
+
+def test_retry_policy_and_fake_rates_defaults(study: Path) -> None:
+    cfg = load_study(study)
+    retry = cfg.session.retry
+    assert (retry.transient_retries, retry.backoff_initial_s, retry.backoff_max_s) == (3, 2, 60)
+    fake = cfg.models[0].fake_settings
+    assert (fake.transient_rate, fake.refusal_rate, fake.fatal_rate) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        ("    transient_retries: 3 ", "    transient_retries: -1 ",
+         "session.retry.transient_retries"),
+        ("    transient_retries: 3 ", "    transient_retries: 1.5 ",
+         "session.retry.transient_retries"),
+        ("    backoff_initial_s: 2 ", "    backoff_initial_s: -0.5 ",
+         "session.retry.backoff_initial_s"),
+        ("    backoff_max_s: 60 ", "    backoff_max_s: -1 ", "session.retry.backoff_max_s"),
+        ("    backoff_max_s: 60 ", '    backoff_max_s: "60" ', "session.retry.backoff_max_s"),
+        ("    backoff_max_s: 60 ", "    backoff_max_s: 60\n    jitter: 1 ",
+         "session.retry.jitter"),
+        ("      transient_rate: 0 ", "      transient_rate: 1.5 ",
+         "models.0.fake.transient_rate"),
+        ("      refusal_rate: 0 ", "      refusal_rate: -0.1 ", "models.0.fake.refusal_rate"),
+        ("      fatal_rate: 0 ", '      fatal_rate: "0.5" ', "models.0.fake.fatal_rate"),
+    ],
+)
+def test_retry_policy_and_fake_rate_bounds(study: Path, old: str, new: str, field: str) -> None:
+    _edit(study / "study.yaml", old, new)
+    err = _err(load_study, study)
+    assert err.code == "config_invalid"
+    assert err.message.startswith(f"{field}:")
+
+
+def test_retry_backoff_max_below_initial_message(study: Path) -> None:
+    _edit(study / "study.yaml", "    backoff_max_s: 60 ", "    backoff_max_s: 1 ")
+    err = _err(load_study, study)
+    assert err.code == "config_invalid"
+    assert err.message == "session.retry: backoff_max_s must be at least backoff_initial_s"
+
+
+@pytest.mark.parametrize("field", ["backoff_initial_s", "backoff_max_s"])
+@pytest.mark.parametrize("value", [".inf", ".nan"])
+def test_retry_backoff_must_be_finite(study: Path, field: str, value: str) -> None:
+    default = {"backoff_initial_s": 2, "backoff_max_s": 60}[field]
+    _edit(study / "study.yaml", f"    {field}: {default} ", f"    {field}: {value} ")
+    err = _err(load_study, study)
+    assert err.code == "config_invalid"
+    assert err.message.startswith(f"session.retry.{field}:")
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_retry_policy_model_forbids_inf_nan(value: float) -> None:
+    from pydantic import ValidationError
+
+    from consortium.config.models import RetryPolicy
+
+    with pytest.raises(ValidationError):
+        RetryPolicy(backoff_initial_s=0, backoff_max_s=value)
+    with pytest.raises(ValidationError):
+        RetryPolicy(backoff_initial_s=value, backoff_max_s=value)
+
+
+def test_retry_policy_accepts_equal_and_zero_backoff(study: Path) -> None:
+    _edit(study / "study.yaml", "    backoff_initial_s: 2 ", "    backoff_initial_s: 0 ")
+    _edit(study / "study.yaml", "    backoff_max_s: 60 ", "    backoff_max_s: 0 ")
+    assert load_study(study).session.retry.backoff_max_s == 0
+
+
+def test_retry_policy_has_no_per_test_override() -> None:
+    from consortium.config.models import SessionOverrides
+
+    assert "retry" not in SessionOverrides.model_fields

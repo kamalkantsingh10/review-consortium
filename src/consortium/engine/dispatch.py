@@ -15,22 +15,35 @@ through the single writer (``board.writer``):
 6. ``record_actual``: the attempt's actual cost from the returned usage (with no
    usage the reservation stands; an attempt with no ledger row, from before the
    ledger existed, gets one);
-7. ``record_validation`` (story 1.10): an ``ok`` response is parsed and validated
-   by ``core.validate.validate_response`` against the Trial's Instrument (the Items
-   of its request); the attempt's ``valid``, ``invalid_reason`` and canonical
-   answer JSON are recorded;
-8. ``set_state``: a valid attempt -> ``valid``; an invalid one -> ``invalid`` once
-   ``attempt > max_retries`` (no retries left), else the Trial stays ``sent`` and
-   gets a new attempt through steps 1-8 (a new seed, the same request text, its
-   own reservation; a refused reservation leaves it ``sent`` for resume). Any
-   category other than ``ok`` -> ``failed`` (never retried, never validated).
+7. the result's ``Category`` (AD-6; any other value stops the Run with
+   ``adapter_error``, after its response line and actual cost were written) decides
+   the rest (story 2.1):
+
+   - ``ok``: ``record_validation`` (story 1.10): parsed and validated by
+     ``core.validate.validate_response`` against the Trial's Instrument (the Items of
+     its request); the attempt's ``valid``, ``invalid_reason`` and canonical answer
+     JSON are recorded;
+   - ``transient``: ``record_transient``: the attempt's category ``transient``,
+     ``valid`` left empty;
+   - ``refused`` / ``fatal``: never validated;
+8. ``set_state``: a valid attempt -> ``valid``; ``refused`` -> ``refused``;
+   ``fatal`` -> ``failed``. An invalid answer is retried while the Trial's invalid
+   attempts are ``<= max_retries``, else -> ``invalid``. A transient result is
+   retried while its transient attempts are ``<= transient_retries``, else ->
+   ``failed`` (the attempt keeps category ``transient``). A retried Trial stays
+   ``sent`` and gets a new attempt through steps 1-8 (a new seed, the same request
+   text, its own reservation; a refused reservation leaves it ``sent`` for
+   resume). A transient retry first waits ``backoff_delay`` without holding the
+   provider semaphore. Both budgets are counted from the ``attempts`` rows
+   (``board.trials.attempt_counts``), never from the attempt number.
 
 Retries are sequential per Trial: attempt n+1 starts only after attempt n was
-collected and found invalid. A Trial never gets more than ``1 + max_retries``
-attempts: when it already has that many and would need another (on resume),
-it is settled instead (``board.trials.settle_exhausted``): ``invalid`` if its
-last attempt was recorded invalid, ``failed`` (category ``attempts_exhausted``)
-if that attempt was abandoned unanswered, ``valid`` if it was recorded valid.
+collected. A Trial never gets more than ``1 + max_retries + transient_retries``
+attempts: when it would need another past a budget or that cap (on resume), it
+is settled instead (``board.trials.settle_exhausted``): ``invalid`` if its last
+attempt was recorded invalid, ``failed`` if it was recorded transient, ``failed``
+(category ``attempts_exhausted``) if that attempt was abandoned unanswered,
+``valid`` if it was recorded valid.
 
 **Ceiling pause** (story 1.9): once a reservation is refused, or a recorded
 actual cost pushes committed spend over the ceiling (the estimate was too low),
@@ -56,37 +69,43 @@ whose latest attempt has a stored handle to ``(attempt, handle)``. Such a Trial
 is collected at that same attempt (steps 5-8 only: no new attempt, no new
 request line; an invalid answer then continues into retries). Every other
 Trial passed in (``planned``, with any ``attempt``, or ``sent`` without a
-handle) gets a new attempt through steps 1-8; attempt
+handle) gets a new attempt through steps 1-8 at once (no backoff); attempt
 numbers are never reused, and an attempt never marked ``sent`` is never
-collected. A latest attempt already recorded invalid is not in ``collect``
-(``board.trials.load_resumable``), so it gets a new attempt; one already
-recorded valid is settled by the caller from the board and not passed in.
+collected. A latest attempt already recorded invalid or ``transient`` is not in
+``collect`` (``board.trials.load_resumable``), so it gets a new attempt; one
+already recorded valid is settled by the caller from the board and not passed in.
 Terminal Trials must not be passed in.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import hashlib
 import json
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from consortium.archive.jsonl import append_request, append_response
 from consortium.board import ledger as board_ledger
 from consortium.board import tests as board_tests
 from consortium.board import trials as board_trials
 from consortium.board.writer import Writer
+from consortium.config.models import RetryPolicy
 from consortium.core import cost
 from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Trial
 from consortium.core.render import ClipRef, RequestItem, TrialRequest, canonical_json
+from consortium.core.seeds import derive_seed
 from consortium.core.validate import INVALID_RESPONSE, validate_response
-from consortium.raters.base import Handle, MediaRef, Rater, RaterCall, RaterResult
+from consortium.raters.base import CATEGORIES, Handle, MediaRef, Rater, RaterCall, RaterResult
+
+BACKOFF_PURPOSE = "backoff"
 
 
 @dataclass(frozen=True)
@@ -132,27 +151,64 @@ class _InstrumentView:
 
 @dataclass(frozen=True)
 class Outcome:
-    """What one collected attempt means: its validation and the Trial's next step."""
+    """What one collected attempt means before the retry budgets are applied."""
 
     valid: bool | None  # None: not validated (category not ok)
     reason: str | None
     answer_json: str | None
-    state: str | None  # the terminal state to set, None: stays sent and is retried
+    state: str | None  # the terminal state to set; None: retried while its budget lasts
 
 
-def outcome_for(
-    trial: Trial, request: TrialRequest, result: RaterResult, attempt: int, max_retries: int
-) -> Outcome:
-    """Validate ``result`` (core) and decide: ``valid``, retry, ``invalid`` or ``failed``."""
-    if result.category != "ok":
+def outcome_for(trial: Trial, request: TrialRequest, result: RaterResult) -> Outcome:
+    """Map ``result``'s category and, for ``ok``, validate it (core).
+
+    ``refused`` -> ``refused`` and ``fatal`` -> ``failed`` (never validated);
+    ``transient`` and an invalid answer -> ``state`` None (retried while the
+    Trial's budget lasts, see ``retry_left``); a valid answer -> ``valid``.
+    """
+    if result.category == "refused":
+        return Outcome(None, None, None, "refused")
+    if result.category == "fatal":
         return Outcome(None, None, None, "failed")
+    if result.category == "transient":
+        return Outcome(None, None, None, None)
     try:
         parsed = validate_response(result.raw, _InstrumentView(trial.instrument, request.items))
     except ConsortiumError as err:
         if err.code != INVALID_RESPONSE:
             raise
-        return Outcome(False, err.message, None, None if attempt <= max_retries else "invalid")
+        return Outcome(False, err.message, None, None)
     return Outcome(True, None, canonical_json(parsed.answers).decode("utf-8"), "valid")
+
+
+def retry_left(
+    kind: Literal["invalid", "transient"], counts: tuple[int, int], caps: board_trials.RetryCaps
+) -> bool:
+    """Whether the Trial gets another attempt after an ``invalid`` answer or a ``transient``
+    result.
+
+    ``counts`` is ``(invalid, transient)`` from the Trial's ``attempts`` rows,
+    including the attempt just recorded.
+    """
+    invalid, transient = counts
+    if kind == "transient":
+        return transient <= caps.transient_retries
+    if kind == "invalid":
+        return invalid <= caps.max_retries
+    raise ValueError(f"unknown retry kind {kind!r}")
+
+
+def backoff_delay(retry: RetryPolicy, k: int, attempt_seed: int) -> float:
+    """Seconds to wait after a Trial's ``k``-th transient attempt (k >= 1); pure.
+
+    ``min(backoff_max_s, backoff_initial_s * 2^(k-1)) * u`` with ``u =
+    Random(derive_seed(attempt_seed, "backoff", "")).uniform(0.5, 1.0)``.
+    """
+    if k < 1:
+        raise ValueError(f"k must be at least 1, not {k}")
+    base = min(retry.backoff_max_s, retry.backoff_initial_s * 2.0 ** min(k - 1, 1023))
+    u = random.Random(derive_seed(attempt_seed, BACKOFF_PURPOSE, "")).uniform(0.5, 1.0)
+    return base * u
 
 
 def _clips_of(request: TrialRequest) -> list[ClipRef]:
@@ -223,6 +279,7 @@ async def dispatch(
     collect: Mapping[str, tuple[int, str]] | None = None,
     budget: Budget,
     max_retries: int,
+    retry: RetryPolicy | None = None,
 ) -> str | None:
     """Send every ``(Trial, TrialRequest)`` through its Model's Rater.
 
@@ -233,8 +290,11 @@ async def dispatch(
     line carries the SHA-256 of ``request``, which the caller has checked equals
     the archived one. ``budget`` prices and caps every attempt
     (``Budget.zero`` for an uncapped zero-cost Run). ``max_retries`` is the Test's
-    effective ``session.max_retries``: an invalid answer is retried while
-    ``attempt <= max_retries``. Returns ``"ceiling"`` when the Run
+    effective ``session.max_retries``: an invalid answer is retried while the
+    Trial's invalid attempts are ``<= max_retries``. ``retry`` is
+    ``session.retry`` (default ``RetryPolicy()``): a transient result is retried
+    after ``backoff_delay`` while the Trial's transient attempts are ``<=
+    transient_retries``. Returns ``"ceiling"`` when the Run
     paused at the ceiling, else ``None``. Any error stops the Run (see the module docstring):
     ``bad_concurrency`` for ``concurrency < 1``, ``provider_unavailable`` for a
     Model with no Rater, ``bad_max_retries`` for ``max_retries < 0``,
@@ -249,7 +309,8 @@ async def dispatch(
         raise ConsortiumError(
             "bad_max_retries", f"max_retries must be at least 0, not {max_retries}"
         )
-    max_attempts = 1 + max_retries
+    retry = retry if retry is not None else RetryPolicy()
+    caps = board_trials.RetryCaps(max_retries, retry.transient_retries)
     missing = sorted({t.model_id for t, _ in trials} - set(rater_by_model))
     if missing:
         raise ConsortiumError(
@@ -261,6 +322,12 @@ async def dispatch(
     prepared = _Prepared()
     shielded: set[asyncio.Future] = set()
     paused: list[str] = []  # set once a reservation is refused: no new attempt starts
+    paused_event = asyncio.Event()  # wakes Trials waiting out a backoff when the Run pauses
+
+    def pause() -> None:
+        if not paused:
+            paused.append("ceiling")
+        paused_event.set()
     spend = board_ledger.Spend()  # the writer's running committed total
     ceiling = budget.ceiling
 
@@ -269,35 +336,43 @@ async def dispatch(
         if not task.cancelled():
             task.exception()  # retrieved: the awaiting task reports it, or it was cancelled
 
-    async def run_one(trial: Trial, request: TrialRequest) -> None:
-        """New attempts for ``trial`` until it is settled, paused or out of retries."""
-        while await attempt_once(trial, request):
-            pass
+    async def run_one(trial: Trial, request: TrialRequest, delay: float | None = 0.0) -> None:
+        """New attempts for ``trial`` until it is settled, paused or out of retries.
 
-    async def attempt_once(trial: Trial, request: TrialRequest) -> bool:
-        """One new attempt; True when its answer was invalid and it is to be retried."""
+        ``delay`` is the wait before the first one (``None``: none at all). The wait
+        holds no semaphore and ends early when the Run pauses: the Trial then
+        starts no new attempt and stays ``sent``.
+        """
+        while delay is not None:
+            if delay > 0 and not paused:
+                with contextlib.suppress(TimeoutError):  # waited out, or woken by a pause
+                    await asyncio.wait_for(paused_event.wait(), timeout=delay)
+            delay = await attempt_once(trial, request)
+
+    async def attempt_once(trial: Trial, request: TrialRequest) -> float | None:
+        """One new attempt; the wait before the next one, or None when there is none."""
         rater = rater_by_model[trial.model_id]
         tid = trial.trial_id
         async with semaphores[rater.provider]:
             if paused:
-                return False
+                return None
             usd = budget.reservation(trial, request)
 
             def reserve(conn):  # runs on the writer: no attempt starts after a refusal
                 if paused:
                     return None
-                if board_trials.settle_exhausted(conn, tid, max_attempts):
-                    return None  # no attempts left: the Trial is now invalid
+                if board_trials.settle_exhausted(conn, tid, caps):
+                    return None  # no attempts left: the Trial is now settled
                 began = board_trials.begin_attempt(
                     conn, trial_id=tid, study_seed=seed, usd=usd, ceiling=ceiling, spend=spend
                 )
                 if began is None:  # the reservation would cross the ceiling: pause
-                    paused.append("ceiling")
+                    pause()
                 return began
 
             began = await writer.do("begin_attempt", reserve, tid)
             if began is None:
-                return False
+                return None
             attempt, attempt_seed = began
             media = tuple([await prepared.get(rater, c) for c in _clips_of(request)])
             request_record = await writer.do(
@@ -338,8 +413,8 @@ async def dispatch(
     async def finish(
         rater: Rater, trial: Trial, request: TrialRequest, attempt: int, handle: Handle,
         request_sha256: str,
-    ) -> bool:
-        """Collect, archive, price and validate one attempt; True when it is to be retried."""
+    ) -> float | None:
+        """Collect, archive, price and settle one attempt; the wait before a retry, or None."""
         tid = trial.trial_id
         result = _one(await rater.collect([handle]), "collect", rater.provider)
         await writer.do(
@@ -359,32 +434,54 @@ async def dispatch(
                 conn, trial_id=tid, attempt=attempt, model_id=trial.model_id, usd=spent,
                 reserved=reserved, spend=spend,
             )
-            if ceiling is not None and spend.committed(conn) > ceiling and not paused:
-                paused.append("ceiling")
+            if ceiling is not None and spend.committed(conn) > ceiling:
+                pause()
 
         await writer.do("record_actual", record, tid, attempt)
-        outcome = outcome_for(trial, request, result, attempt, max_retries)
-        if outcome.valid is not None:
-            await writer.do(
-                "record_validation",
-                functools.partial(
-                    board_trials.record_validation, trial_id=tid, attempt=attempt,
-                    valid=outcome.valid, reason=outcome.reason,
-                    answer_json=outcome.answer_json, category=result.category,
-                ),
-                tid, attempt,
+        got = result.category
+        if not isinstance(got, str) or got not in CATEGORIES:  # archived and priced first
+            raise ConsortiumError(
+                "adapter_error",
+                f"{rater.provider} Rater: collect returned category {got!r} for {tid} "
+                f"attempt {attempt} (expected one of {', '.join(CATEGORIES)})",
             )
-        if outcome.state is None:
-            return True  # stays sent: a new attempt follows
+        outcome = outcome_for(trial, request, result)
+        state = outcome.state
+        if outcome.valid is not None:
+
+            def validated(conn):
+                board_trials.record_validation(
+                    conn, trial_id=tid, attempt=attempt, valid=outcome.valid,
+                    reason=outcome.reason, answer_json=outcome.answer_json,
+                    category=result.category,
+                )
+                return board_trials.attempt_counts(conn, tid)
+
+            counts = await writer.do("record_validation", validated, tid, attempt)
+            if state is None:
+                if retry_left("invalid", counts, caps):
+                    return 0.0  # stays sent: a new attempt follows at once
+                state = "invalid"
+        elif result.category == "transient":
+
+            def transient(conn):
+                board_trials.record_transient(conn, trial_id=tid, attempt=attempt)
+                return (board_trials.attempt_counts(conn, tid),
+                        board_trials.attempt_seed(conn, tid, attempt))
+
+            counts, attempt_seed = await writer.do("record_transient", transient, tid, attempt)
+            if retry_left("transient", counts, caps):
+                return backoff_delay(retry, counts[1], attempt_seed)  # stays sent
+            state = "failed"
         await writer.do(
             "set_state",
             functools.partial(
                 board_trials.set_state, trial_id=tid, attempt=attempt,
-                state=outcome.state, category=result.category,
+                state=state, category=result.category,
             ),
             tid, attempt,
         )
-        return False
+        return None
 
     async def collect_one(trial: Trial, request: TrialRequest, attempt: int, handle: str) -> None:
         """Resume a ``sent`` attempt with a handle: collect it, never re-send it."""
@@ -399,9 +496,8 @@ async def dispatch(
                 "adapter_error", f"stored handle unreadable for {trial.trial_id}"
             )
         async with semaphores[rater.provider]:
-            retry = await finish(rater, trial, request, attempt, parsed, request_sha256)
-        if retry:
-            await run_one(trial, request)
+            delay = await finish(rater, trial, request, attempt, parsed, request_sha256)
+        await run_one(trial, request, delay)
 
     try:
         async with asyncio.TaskGroup() as group:

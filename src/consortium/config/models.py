@@ -95,8 +95,9 @@ class MediaLimits(_Strict):
 
 
 class FakeSettings(_Strict):
-    """What the Fake rater reports as usage for each answer (story 1.9) and how often
-    it answers invalidly (story 1.10)."""
+    """What the Fake rater reports as usage for each answer (story 1.9), how often it
+    answers invalidly (story 1.10) and how often it simulates a transient error, a
+    refusal or a fatal error (story 2.1)."""
 
     input_tokens: Annotated[StrictInt, Field(ge=0)] = 0
     output_tokens: Annotated[StrictInt, Field(ge=0)] = 0
@@ -104,6 +105,21 @@ class FakeSettings(_Strict):
         default=0.0,
         description="Probability (0-1) that an attempt's answer is invalid; decided per "
         "attempt seed, so deterministic.",
+    )
+    transient_rate: Annotated[float, Field(ge=0, le=1, strict=True)] = Field(
+        default=0.0,
+        description="Probability (0-1) that an attempt simulates a rate limit or transport "
+        "error (category transient); decided per attempt seed.",
+    )
+    refusal_rate: Annotated[float, Field(ge=0, le=1, strict=True)] = Field(
+        default=0.0,
+        description="Probability (0-1) that an attempt simulates a safety refusal "
+        "(category refused); decided per attempt seed.",
+    )
+    fatal_rate: Annotated[float, Field(ge=0, le=1, strict=True)] = Field(
+        default=0.0,
+        description="Probability (0-1) that an attempt simulates a fatal provider error "
+        "(category fatal); decided per attempt seed.",
     )
 
 
@@ -155,11 +171,35 @@ class MediaProfile(_Strict):
         return value
 
 
+class RetryPolicy(_Strict):
+    """Retries after a ``transient`` Rater result (story 2.1), separate from ``max_retries``.
+
+    The k-th transient attempt of a Trial waits ``min(backoff_max_s, backoff_initial_s *
+    2^(k-1))`` seconds times a jitter in [0.5, 1.0] derived from its attempt seed.
+    Both backoff values must be finite.
+    """
+
+    transient_retries: Annotated[StrictInt, Field(ge=0)] = 3
+    backoff_initial_s: Annotated[float, Field(ge=0, strict=True, allow_inf_nan=False)] = 2
+    backoff_max_s: Annotated[float, Field(ge=0, strict=True, allow_inf_nan=False)] = 60
+
+    @model_validator(mode="after")
+    def _max_at_least_initial(self) -> RetryPolicy:
+        if self.backoff_max_s < self.backoff_initial_s:
+            raise ValueError("backoff_max_s must be at least backoff_initial_s")
+        return self
+
+
 class SessionConfig(_Strict):
     practice_clips: Annotated[StrictInt, Field(ge=0)] = 2
     repeats: Annotated[StrictInt, Field(ge=1)] = 3
     max_retries: Annotated[StrictInt, Field(ge=0)] = 2
     pairing: Literal["all_pairs"] = "all_pairs"
+    retry: RetryPolicy = Field(
+        default_factory=RetryPolicy,
+        description="Transient-error retries and backoff; study.yaml only (no per-Test "
+        "override).",
+    )
 
 
 class SessionOverrides(_Strict):

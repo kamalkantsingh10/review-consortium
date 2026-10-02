@@ -77,6 +77,9 @@ def _make_study(root: Path, rate: float = RATE) -> Path:
     cfg = yaml.safe_load((study / "study.yaml").read_text())
     assert cfg["seed"] == STUDY_SEED
     cfg["models"][0]["fake"]["invalid_rate"] = rate
+    # No transient results here, so the attempt cap is 1 + max_retries as in story 1.10
+    # (transient budgets are covered by test_failures.py).
+    cfg["session"]["retry"]["transient_retries"] = 0
     (study / "study.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
     personas_stage.generate(study)
     _add_clips(study, TARGETS + PRACTICE)
@@ -295,7 +298,7 @@ def test_two_valid_attempts_highest_wins(ran: Path, tmp_path: Path) -> None:
             board_trials.set_state(conn, tid, 3, "invalid", "ok")
         with pytest.raises(ValueError):
             board_trials.set_state(conn, tid, 1, "valid", "ok")
-        assert not board_trials.settle_exhausted(conn, tid, 3)
+        assert not board_trials.settle_exhausted(conn, tid, board_trials.RetryCaps(2))
     finally:
         conn.close()
     assert (_trials(study)[tid]["state"], _trials(study)[tid]["attempt"]) == ("valid", 3)
@@ -502,7 +505,7 @@ def test_late_collected_invalid_answer_is_retried(study: Path) -> None:
 
 class _ErrorRater(FakeRater):
     async def collect(self, handles):
-        return [RaterResult(r.raw, r.usage, r.model_build, "error")
+        return [RaterResult(r.raw, r.usage, r.model_build, "fatal")
                 for r in await super().collect(handles)]
 
 

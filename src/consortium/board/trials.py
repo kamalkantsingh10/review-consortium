@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
 from decimal import Decimal
 
 from consortium.board.db import transaction
@@ -23,6 +24,26 @@ from consortium.core.validate import invalid_rate
 TRIAL_STATES = ("planned", "sent", "valid", "invalid", "refused", "failed")
 TERMINAL_STATES = ("valid", "invalid", "refused", "failed")
 MODEL_PURPOSE = "model"
+TRANSIENT = "transient"
+ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+
+
+@dataclass(frozen=True)
+class RetryCaps:
+    """A Trial's two retry budgets (story 2.1), counted from its ``attempts`` rows.
+
+    An invalid answer is retried while the Trial's invalid attempts (``valid = 0``)
+    are ``<= max_retries``; a transient result while its transient attempts
+    (``category = 'transient'``) are ``<= transient_retries``. ``max_attempts`` is
+    the hard cap on attempts of any kind (abandoned ones included).
+    """
+
+    max_retries: int
+    transient_retries: int = 0
+
+    @property
+    def max_attempts(self) -> int:
+        return 1 + self.max_retries + self.transient_retries
 
 _TRIAL_COLUMNS = (
     "trial_id", "test", "session_id", "trial_index", "instrument", "clip_ids", "pair_id",
@@ -87,64 +108,98 @@ def trial_from_row(row: dict) -> Trial:
 
 
 def _latest(conn: sqlite3.Connection, trial_id: str, attempt: int) -> tuple | None:
-    """``(handle, sent_at, valid)`` of the Trial's attempt ``attempt``; None if not recorded."""
+    """``(handle, sent_at, valid, category)`` of the Trial's attempt ``attempt``; None if
+    not recorded."""
     return conn.execute(
-        "SELECT handle, sent_at, valid FROM attempts WHERE trial_id = ? AND attempt = ?",
+        "SELECT handle, sent_at, valid, category FROM attempts"
+        " WHERE trial_id = ? AND attempt = ?",
         (trial_id, attempt),
     ).fetchone()
 
 
+def attempt_counts(conn: sqlite3.Connection, trial_id: str) -> tuple[int, int]:
+    """``(invalid, transient)``: the Trial's attempts recorded invalid (``valid = 0``) and
+    recorded ``transient`` (story 2.1)."""
+    invalid, transient = conn.execute(
+        "SELECT coalesce(sum(valid = 0), 0), coalesce(sum(category = ?), 0)"
+        " FROM attempts WHERE trial_id = ?",
+        (TRANSIENT, trial_id),
+    ).fetchone()
+    return int(invalid), int(transient)
+
+
 def settlement(
-    state: str, attempt: int, latest: tuple | None, max_attempts: int | None
+    state: str,
+    attempt: int,
+    latest: tuple | None,
+    caps: RetryCaps | None,
+    counts: tuple[int, int] = (0, 0),
 ) -> str | None:
-    """The state a non-terminal Trial is settled to without dispatch (story 1.10), or None.
+    """The state a non-terminal Trial is settled to without dispatch, or None.
+
+    ``latest`` is ``_latest``'s row, ``counts`` is ``attempt_counts`` (stories 1.10, 2.1):
 
     - latest attempt recorded valid (stopped before its state write): ``valid``;
-    - ``attempt >= max_attempts`` and the latest attempt recorded invalid: ``invalid``;
-    - ``attempt >= max_attempts`` and the latest attempt never answered (abandoned,
-      not collectable): ``failed`` (category ``attempts_exhausted``), so it is not
-      counted as an invalid answer.
-    A ``sent`` latest attempt with a handle and no validation is collected instead.
+    - latest recorded invalid and invalid attempts > ``max_retries``: ``invalid``;
+    - latest recorded ``transient`` and transient attempts > ``transient_retries``:
+      ``failed`` (its category stays ``transient``);
+    - ``attempt >= max_attempts`` (the hard cap): ``invalid`` if the latest attempt was
+      recorded invalid, ``failed`` if it was recorded transient, and ``failed``
+      (category ``attempts_exhausted``) if it was never answered (abandoned, not
+      collectable), so it is not counted as an invalid answer.
+    A ``sent`` latest attempt with a handle and no recorded outcome is collected instead.
     """
     if attempt == 0 or latest is None:
         return None
-    handle, sent_at, valid = latest
+    handle, sent_at, valid, category = latest
     if valid == 1:
         return "valid"
-    if max_attempts is None or attempt < max_attempts:
+    if caps is None:
+        return None
+    invalid, transient = counts
+    if valid == 0 and invalid > caps.max_retries:
+        return "invalid"
+    if category == TRANSIENT and transient > caps.transient_retries:
+        return "failed"
+    if attempt < caps.max_attempts:
         return None
     if valid == 0:
         return "invalid"
+    if category == TRANSIENT:
+        return "failed"
     if state == "sent" and sent_at is not None and handle is not None:
         return None  # collectable: it may still be answered
     return "failed"
 
 
 def load_resumable(
-    conn: sqlite3.Connection, test: str, max_attempts: int | None = None
+    conn: sqlite3.Connection, test: str, caps: RetryCaps | None = None
 ) -> list[dict]:
     """Every non-terminal Trial of ``test`` in plan order, for resume (story 1.8).
 
     Each row is a ``load_trials`` row plus ``handle`` and ``settle``. ``handle``
     is the stored handle (JSON text) of the Trial's latest attempt (``attempt``)
-    if that attempt was marked ``sent``, has one and is not yet validated, else
-    ``None``. A ``planned`` Trial's attempt, never marked ``sent``, is never
+    if that attempt was marked ``sent``, has one and has no recorded outcome yet,
+    else ``None``. A ``planned`` Trial's attempt, never marked ``sent``, is never
     collected, so its handle is always ``None``. A latest attempt already
-    recorded invalid (``valid = 0``, story 1.10) is not collected again: it gets
-    a new attempt. ``settle`` (story 1.10, see ``settlement``) is the state the
-    Trial is settled to from the board without any dispatch, else ``None``;
-    ``max_attempts`` is ``1 + max_retries`` (``None``: no attempt cap).
+    recorded invalid (``valid = 0``, story 1.10) or ``transient`` (stopped
+    mid-backoff, story 2.1) is not collected again: it gets a new attempt at once.
+    ``settle`` (see ``settlement``) is the state the Trial is settled to from the
+    board without any dispatch, else ``None``; ``caps`` are the retry budgets
+    (``None``: no budget and no attempt cap).
     """
     out = []
     for row in load_trials(conn, test):
         if row["state"] in TERMINAL_STATES:
             continue
-        latest = _latest(conn, row["trial_id"], row["attempt"]) if row["attempt"] else None
-        settle = settlement(row["state"], row["attempt"], latest, max_attempts)
+        tid = row["trial_id"]
+        latest = _latest(conn, tid, row["attempt"]) if row["attempt"] else None
+        counts = attempt_counts(conn, tid) if latest is not None else (0, 0)
+        settle = settlement(row["state"], row["attempt"], latest, caps, counts)
         handle = None
         if settle is None and row["state"] == "sent" and latest is not None:
-            stored, sent_at, valid = latest
-            if sent_at is not None and valid is None:
+            stored, sent_at, valid, category = latest
+            if sent_at is not None and valid is None and category is None:
                 handle = stored
         out.append({**row, "handle": handle, "settle": settle})
     return out
@@ -258,6 +313,32 @@ def set_state(
         )
 
 
+def attempt_seed(conn: sqlite3.Connection, trial_id: str, attempt: int) -> int:
+    """The recorded seed of the Trial's attempt ``attempt``."""
+    row = conn.execute(
+        "SELECT seed FROM attempts WHERE trial_id = ? AND attempt = ?", (trial_id, attempt)
+    ).fetchone()
+    if row is None:
+        raise KeyError((trial_id, attempt))
+    return row[0]
+
+
+def record_transient(conn: sqlite3.Connection, trial_id: str, attempt: int) -> None:
+    """Record a ``transient`` result of one attempt (story 2.1): category and ``answered_at``.
+
+    ``valid`` stays empty and the Trial's state is not changed (it stays ``sent``
+    and gets a new attempt, or ``set_state`` fails it once its budget is spent).
+    """
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE attempts SET category = ?, answered_at = ?"
+            " WHERE trial_id = ? AND attempt = ? AND valid IS NULL",
+            (TRANSIENT, utc_now_ms(), trial_id, attempt),
+        )
+        if cur.rowcount != 1:
+            raise KeyError((trial_id, attempt))
+
+
 def state_counts(conn: sqlite3.Connection, test: str) -> dict[str, int]:
     """Trials of ``test`` by state, in lifecycle order; states with no Trial are omitted."""
     found = dict(
@@ -299,8 +380,9 @@ def settle(conn: sqlite3.Connection, trial_id: str, attempt: int, state: str) ->
     """Settle a non-terminal Trial at its latest ``attempt`` to ``state`` (story 1.10).
 
     ``state`` comes from ``settlement``. ``failed`` records category
-    ``attempts_exhausted`` on the attempt; ``valid``/``invalid`` keep the
-    category recorded with the attempt's validation. Never changes a terminal state.
+    ``attempts_exhausted`` on an attempt that has none (never answered) and keeps a
+    recorded one (``transient``); ``valid``/``invalid`` keep the category recorded
+    with the attempt's validation. Never changes a terminal state.
     """
     if state not in ("valid", "invalid", "failed"):
         raise ValueError(f"cannot settle a Trial to {state!r}")
@@ -312,20 +394,20 @@ def settle(conn: sqlite3.Connection, trial_id: str, attempt: int, state: str) ->
         )
         if cur.rowcount != 1:
             raise ValueError(f"Trial {trial_id} attempt {attempt} cannot be settled {state}")
-        category = "attempts_exhausted" if state == "failed" else None
+        category = ATTEMPTS_EXHAUSTED if state == "failed" else None
         conn.execute(
-            "UPDATE attempts SET category = coalesce(?, category),"
+            "UPDATE attempts SET category = coalesce(category, ?),"
             " answered_at = coalesce(answered_at, ?) WHERE trial_id = ? AND attempt = ?",
             (category, utc_now_ms(), trial_id, attempt),
         )
 
 
-def settle_exhausted(conn: sqlite3.Connection, trial_id: str, max_attempts: int) -> bool:
+def settle_exhausted(conn: sqlite3.Connection, trial_id: str, caps: RetryCaps) -> bool:
     """Settle the Trial (see ``settlement``) if it can take no new attempt; True if settled.
 
-    The engine's guard before every new attempt, so a Trial never gets more than
-    ``max_attempts`` (``1 + max_retries``) attempts. A terminal Trial is left
-    unchanged (False).
+    The engine's guard before every new attempt, so a Trial never exceeds its
+    budgets or ``caps.max_attempts`` attempts. A terminal Trial is left unchanged
+    (False).
     """
     row = conn.execute(
         "SELECT state, attempt FROM trials WHERE trial_id = ?", (trial_id,)
@@ -333,11 +415,14 @@ def settle_exhausted(conn: sqlite3.Connection, trial_id: str, max_attempts: int)
     if row is None:
         raise KeyError(trial_id)
     state, attempt = row
-    if state in TERMINAL_STATES or attempt < max_attempts:
+    if state in TERMINAL_STATES or attempt == 0:
         return False
-    target = settlement(state, attempt, _latest(conn, trial_id, attempt), max_attempts)
-    if target is None:  # a collectable attempt: never dispatched past the cap
-        target = "failed"
+    latest = _latest(conn, trial_id, attempt)
+    target = settlement(state, attempt, latest, caps, attempt_counts(conn, trial_id))
+    if target is None:
+        if attempt < caps.max_attempts:
+            return False
+        target = "failed"  # a collectable attempt at the cap: never dispatched past it
     settle(conn, trial_id, attempt, target)
     return True
 

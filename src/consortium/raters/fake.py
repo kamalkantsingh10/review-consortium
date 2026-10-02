@@ -16,6 +16,15 @@ answers stay unbiased); the outcome is fixed by the attempt seed. Invalid answer
 attempt number through ``INVALID_KINDS``: not JSON, a missing Item, and an
 out-of-range value (a Likert value above the scale, a pairwise choice that is
 not an option, an empty free text). The Fake rater never validates anything.
+
+Simulated provider outcomes (story 2.1): with ``transient_rate``, ``refusal_rate``
+and ``fatal_rate`` (each 0-1) an attempt's outcome is drawn per kind from its own
+stream, ``random.Random(derive_seed(call.seed, "fake_<kind>", "")).random() <
+rate``, checked in the order fatal, refused, transient, then invalid; the first
+hit decides. A transient ``raw`` alternates with the attempt number between a
+simulated rate limit (odd attempts) and a simulated transport error (even). The
+outcome is decided at submit time and carried in the handle (``category``);
+``collect`` returns it, with zero usage for every non-``ok`` result.
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ import random
 
 from consortium.core.render import ClipRef, TrialRequest, canonical_json
 from consortium.core.seeds import derive_seed
-from consortium.raters.base import Handle, MediaRef, RaterCall, RaterResult
+from consortium.raters.base import Category, Handle, MediaRef, RaterCall, RaterResult
 
 FAKE_BUILD = "fake-1"
 FREE_TEXT_ANSWER = "fake answer"
@@ -34,6 +43,44 @@ INVALID_KINDS = ("not_json", "missing_item", "out_of_range")
 
 
 INVALID_PURPOSE = "fake_invalid"
+# Checked in this order; the first hit decides the attempt's category.
+OUTCOME_KINDS: tuple[tuple[str, Category], ...] = (
+    ("fatal", "fatal"), ("refused", "refused"), ("transient", "transient"),
+)
+TRANSIENT_RAW = (
+    "simulated rate limit: 429 RESOURCE_EXHAUSTED",
+    "simulated transport error: connection reset",
+)
+REFUSED_RAW = "simulated refusal: the request was blocked for safety reasons"
+FATAL_RAW = "simulated fatal error: 400 INVALID_ARGUMENT"
+
+
+def _hit(seed: int, kind: str, rate: float) -> bool:
+    if rate <= 0:
+        return False
+    return random.Random(derive_seed(seed, f"fake_{kind}", "")).random() < rate
+
+
+def fake_category(
+    seed: int, transient_rate: float = 0.0, refusal_rate: float = 0.0, fatal_rate: float = 0.0
+) -> Category:
+    """The simulated category of the attempt with ``seed`` (``ok``: answered).
+
+    Each kind is drawn from its own stream, ``Random(derive_seed(seed, "fake_<kind>",
+    ""))``, in the order fatal, refused, transient.
+    """
+    rates = {"fatal": fatal_rate, "refused": refusal_rate, "transient": transient_rate}
+    for kind, category in OUTCOME_KINDS:
+        if _hit(seed, kind, rates[kind]):
+            return category
+    return "ok"
+
+
+def fake_error_raw(category: Category, attempt: int) -> str:
+    """The error summary a non-``ok`` simulated result carries as ``raw``."""
+    if category == "transient":
+        return TRANSIENT_RAW[(attempt - 1) % len(TRANSIENT_RAW)]
+    return REFUSED_RAW if category == "refused" else FATAL_RAW
 
 
 def is_invalid_attempt(seed: int, invalid_rate: float) -> bool:
@@ -83,11 +130,24 @@ class FakeRater:
     provider = "fake"
 
     def __init__(
-        self, input_tokens: int = 0, output_tokens: int = 0, invalid_rate: float = 0.0
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        invalid_rate: float = 0.0,
+        transient_rate: float = 0.0,
+        refusal_rate: float = 0.0,
+        fatal_rate: float = 0.0,
     ) -> None:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.invalid_rate = invalid_rate
+        self.transient_rate = transient_rate
+        self.refusal_rate = refusal_rate
+        self.fatal_rate = fatal_rate
+
+    def category(self, call: RaterCall) -> Category:
+        """The simulated category of ``call`` (see the module docstring)."""
+        return fake_category(call.seed, self.transient_rate, self.refusal_rate, self.fatal_rate)
 
     def answer(self, call: RaterCall) -> str:
         """The raw answer to ``call`` (valid, or invalid at ``invalid_rate``)."""
@@ -98,20 +158,25 @@ class FakeRater:
     async def prepare(self, clip: ClipRef) -> MediaRef:
         return MediaRef(clip.clip_id, clip.sha256, f"fake:{clip.clip_id}")
 
+    def _handle(self, call: RaterCall) -> Handle:
+        category = self.category(call)
+        raw = self.answer(call) if category == "ok" else fake_error_raw(category, call.attempt)
+        return {"provider": self.provider, "trial_id": call.trial_id, "attempt": call.attempt,
+                "category": category, "raw": raw}
+
     async def submit(self, calls: list[RaterCall]) -> list[Handle]:
-        return [
-            {"provider": self.provider, "trial_id": c.trial_id, "attempt": c.attempt,
-             "raw": self.answer(c)}
-            for c in calls
-        ]
+        return [self._handle(c) for c in calls]
 
     async def collect(self, handles: list[Handle]) -> list[RaterResult]:
-        return [
-            RaterResult(
+        out = []
+        for h in handles:
+            category = h.get("category", "ok")  # handles from before story 2.1 are answers
+            ok = category == "ok"
+            out.append(RaterResult(
                 raw=h["raw"],
-                usage={"input_tokens": self.input_tokens, "output_tokens": self.output_tokens},
+                usage={"input_tokens": self.input_tokens if ok else 0,
+                       "output_tokens": self.output_tokens if ok else 0},
                 model_build=FAKE_BUILD,
-                category="ok",
-            )
-            for h in handles
-        ]
+                category=category,
+            ))
+        return out

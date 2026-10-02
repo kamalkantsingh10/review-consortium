@@ -198,3 +198,75 @@ def render_card(persona: Persona, wording: _Wording) -> str:
     except KeyError as err:
         raise ValueError(f"no card sentence for NARS band {persona.nars!r}") from err
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- attributes
+
+# Trial counts for differential attrition (story 2.1). ``failed`` is the total of the three
+# ``failed_*`` kinds, split by the category of the Trial's last attempt (see ``count_trial``).
+ATTRITION_COUNTS = (
+    "trials", "invalid", "refused", "failed", "failed_fatal", "failed_transient",
+    "failed_exhausted",
+)
+_FAILED_KIND = {"transient": "failed_transient", "attempts_exhausted": "failed_exhausted"}
+
+
+def count_trial(acc: dict[str, int], state: str, category: str | None) -> None:
+    """Add one Trial in ``state`` (its last attempt's ``category``) to ``acc`` (pure).
+
+    A ``failed`` Trial counts as ``failed_transient`` (transient budget spent),
+    ``failed_exhausted`` (``attempts_exhausted``) or ``failed_fatal`` (category ``fatal``,
+    or any other or none recorded).
+    """
+    acc["trials"] += 1
+    if state in ("invalid", "refused", "failed"):
+        acc[state] += 1
+    if state == "failed":
+        acc[_FAILED_KIND.get(category or "", "failed_fatal")] += 1
+
+
+def attribute_names() -> list[str]:
+    """``persona_<field>`` per ``Persona`` field except ``id``, in field order; ``big_five``
+    gives one ``persona_<trait>`` per trait (the export's Persona columns)."""
+    out: list[str] = []
+    for name in Persona.model_fields:
+        if name == "id":
+            continue
+        if name == "big_five":
+            out.extend(f"persona_{trait}" for trait in TRAITS)
+        else:
+            out.append(f"persona_{name}")
+    return out
+
+
+def attribute_values(persona: Persona) -> dict[str, str]:
+    """``{persona_<field>: value}`` in ``attribute_names`` order."""
+    out: dict[str, str] = {}
+    for name in Persona.model_fields:
+        if name == "id":
+            continue
+        if name == "big_five":
+            out.update({f"persona_{trait}": persona.big_five[trait] for trait in TRAITS})
+        else:
+            out[f"persona_{name}"] = getattr(persona, name)
+    return out
+
+
+def tally_by_attribute(
+    counts_by_persona: Mapping[str, Mapping[str, int]], personas: Mapping[str, Persona]
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Sum per-Persona counts per Persona attribute value (pure).
+
+    ``counts_by_persona`` maps a Persona ID to its ``ATTRITION_COUNTS`` counts;
+    ``personas`` maps a Persona ID to its ``Persona`` (``KeyError`` for an unknown
+    ID). Returns ``{persona_<field>: {value: {<ATTRITION_COUNTS>}}}`` with every
+    attribute of ``attribute_names`` (in that order) and its values in the order they
+    are first seen while walking ``counts_by_persona`` in its order.
+    """
+    out: dict[str, dict[str, dict[str, int]]] = {name: {} for name in attribute_names()}
+    for persona_id, counts in counts_by_persona.items():
+        for name, value in attribute_values(personas[persona_id]).items():
+            acc = out[name].setdefault(value, dict.fromkeys(ATTRITION_COUNTS, 0))
+            for key in ATTRITION_COUNTS:
+                acc[key] += int(counts.get(key, 0))
+    return out

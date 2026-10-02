@@ -229,6 +229,9 @@ def test_estimate_plan_sums_and_worst_case(study: Path) -> None:
     each = [estimate(r, cfg.model_by_id(t.model_id), prices, DURATIONS) for t, r in pairs]
     assert est.trials == TRIALS and est.expected == sum(each, Decimal(0)) > 0
     assert est.worst_case == est.expected * 3
+    with_transient = estimate_plan(plan, (r for _, r in pairs), cfg, prices, DURATIONS,
+                                   max_retries=2, transient_retries=3)
+    assert with_transient.worst_case == est.expected * 6
     assert est.providers == ("fake",)
     # Both pairwise orders, Practice clips and every Trial are included.
     assert len({t.trial_id for t, _ in pairs}) == TRIALS
@@ -286,8 +289,8 @@ def test_confirm_prints_estimate_before_any_rater_call(
     assert "prepare" in calls and "submit" in calls
     exp = _expected(study)
     assert summary.estimate.expected == exp
-    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 3)} USD " \
-           "(max_retries 2)" in summary.lines()
+    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 6)} USD " \
+           "(max_retries 2, transient_retries 3)" in summary.lines()
     assert "cost covers: 256 Trials; Clips go to: fake" in summary.lines()
     assert _ceilings(study) == [(None, "100")]
     _assert_ledger_invariants(study)
@@ -312,8 +315,8 @@ def test_over_ceiling(study: Path) -> None:
     assert result.exit_code == 1
     assert result.stderr == (
         f"over_ceiling: expected {usd(exp)} > ceiling {usd(ceiling)}; nothing was sent\n")
-    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 3)} USD " \
-           "(max_retries 2)" in result.stdout
+    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 6)} USD " \
+           "(max_retries 2, transient_retries 3)" in result.stdout
     _nothing_sent(study)
     assert _ceilings(study) == []
 
@@ -339,12 +342,12 @@ def test_over_ceiling_counts_committed_spend(
 
 def test_only_worst_case_over_runs(study: Path) -> None:
     exp = _expected(study)
-    ceiling = exp * 2  # expected <= ceiling < worst case (x3)
+    ceiling = exp * 2  # expected <= ceiling < worst case (x6)
     result = _cli("pilot1", "--yes", "--ceiling", str(ceiling), "--study", str(study))
     assert result.exit_code == 0, result.stderr
     out = result.stdout.splitlines()
-    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 3)} USD " \
-           "(max_retries 2)" in out
+    assert f"cost estimate: expected {usd(exp)} USD, worst case {usd(exp * 6)} USD " \
+           "(max_retries 2, transient_retries 3)" in out
     assert out[-2] == f"states: valid {TRIALS}"
     assert out[-1] == f"cost: committed {usd(_committed(study))} USD, ceiling {usd(ceiling)} USD"
     assert _paused(study) is None
@@ -353,10 +356,11 @@ def test_only_worst_case_over_runs(study: Path) -> None:
 
 def _to_gemini(study: Path) -> None:
     cfg = study / "study.yaml"
-    text = cfg.read_text()
-    start, end = text.index("    fake:"), text.index("      invalid_rate:")
-    text = text[:start] + text[text.index("\n", end) + 1:]
-    cfg.write_text(text.replace("provider: fake ", "provider: gemini ", 1))
+    doc = yaml.safe_load(cfg.read_text())
+    model = doc["models"][0]
+    del model["fake"]
+    model["provider"] = "gemini"
+    cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
 def _free_prices(study: Path) -> None:

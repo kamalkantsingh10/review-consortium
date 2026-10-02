@@ -2,8 +2,16 @@
   "$defs": {
     "FakeSettings": {
       "additionalProperties": false,
-      "description": "What the Fake rater reports as usage for each answer (story 1.9) and how often\nit answers invalidly (story 1.10).",
+      "description": "What the Fake rater reports as usage for each answer (story 1.9), how often it\nanswers invalidly (story 1.10) and how often it simulates a transient error, a\nrefusal or a fatal error (story 2.1).",
       "properties": {
+        "fatal_rate": {
+          "default": 0.0,
+          "description": "Probability (0-1) that an attempt simulates a fatal provider error (category fatal); decided per attempt seed.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Fatal Rate",
+          "type": "number"
+        },
         "input_tokens": {
           "default": 0,
           "minimum": 0,
@@ -23,6 +31,22 @@
           "minimum": 0,
           "title": "Output Tokens",
           "type": "integer"
+        },
+        "refusal_rate": {
+          "default": 0.0,
+          "description": "Probability (0-1) that an attempt simulates a safety refusal (category refused); decided per attempt seed.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Refusal Rate",
+          "type": "number"
+        },
+        "transient_rate": {
+          "default": 0.0,
+          "description": "Probability (0-1) that an attempt simulates a rate limit or transport error (category transient); decided per attempt seed.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Transient Rate",
+          "type": "number"
         }
       },
       "title": "FakeSettings",
@@ -253,6 +277,32 @@
       "title": "Quotas",
       "type": "object"
     },
+    "RetryPolicy": {
+      "additionalProperties": false,
+      "description": "Retries after a ``transient`` Rater result (story 2.1), separate from ``max_retries``.\n\nThe k-th transient attempt of a Trial waits ``min(backoff_max_s, backoff_initial_s *\n2^(k-1))`` seconds times a jitter in [0.5, 1.0] derived from its attempt seed.\nBoth backoff values must be finite.",
+      "properties": {
+        "backoff_initial_s": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Backoff Initial S",
+          "type": "number"
+        },
+        "backoff_max_s": {
+          "default": 60,
+          "minimum": 0,
+          "title": "Backoff Max S",
+          "type": "number"
+        },
+        "transient_retries": {
+          "default": 3,
+          "minimum": 0,
+          "title": "Transient Retries",
+          "type": "integer"
+        }
+      },
+      "title": "RetryPolicy",
+      "type": "object"
+    },
     "SessionConfig": {
       "additionalProperties": false,
       "properties": {
@@ -279,6 +329,10 @@
           "minimum": 1,
           "title": "Repeats",
           "type": "integer"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "description": "Transient-error retries and backoff; study.yaml only (no per-Test override)."
         }
       },
       "title": "SessionConfig",

@@ -131,7 +131,7 @@ def test_dry_run_counts_and_writes_nothing(study: Path) -> None:
         "by instrument: godspeed 768, pairwise_alive 2304",
         "by type: single 768, pairwise 2304",
         f"requests sha256: {_digest(study)}",
-        "cost estimate: expected 0 USD, worst case 0 USD (max_retries 2)",
+        "cost estimate: expected 0 USD, worst case 0 USD (max_retries 2, transient_retries 3)",
         "cost covers: 3072 Trials; Clips go to: fake",
         "ceiling: none, committed before: 0 USD",
     ]

@@ -14,6 +14,11 @@ and, on a Test-total row, ``paused`` (the Test's pause reason). Every registered
 Test has a Test-total row, all zeros if it was never opened. The footer is
 Study-wide: committed spend, the ceiling and ``state: ok`` or
 ``state: paused <test> (<reason>)[, ...]`` listing every paused Test.
+
+``--json`` also carries ``by_persona_attribute`` (story 2.1): per Test,
+``core.personas.ATTRITION_COUNTS`` per Persona attribute value (the export's
+``persona_*`` names, via ``core.personas.tally_by_attribute``); ``null`` when the
+Panel cannot be loaded. It never carries a Condition.
 """
 
 from __future__ import annotations
@@ -28,13 +33,16 @@ from typing import Any
 from consortium.board.db import read_only
 from consortium.board.queries import (
     cost_footer,
+    persona_counts,
     read_transaction,
     registered_tests,
     status_counts,
 )
 from consortium.board.trials import TRIAL_STATES
+from consortium.config.load import load_personas
 from consortium.core.cost import usd
 from consortium.core.errors import ConsortiumError
+from consortium.core.personas import tally_by_attribute
 from consortium.core.validate import invalid_rate
 
 ALL = "*"
@@ -56,6 +64,8 @@ class StatusReport:
     ceiling: Decimal | None = None
     paused: list[tuple[str, str]] = field(default_factory=list)
     test: str | None = None
+    # {test: {persona_<field>: {value: {<ATTRITION_COUNTS>}}}}; None: no Panel
+    by_persona_attribute: dict[str, dict[str, dict[str, dict[str, int]]]] | None = None
 
     @property
     def state(self) -> str:
@@ -77,6 +87,7 @@ class StatusReport:
             "ceiling": None if self.ceiling is None else usd(self.ceiling),
             "state": self.state,
             "paused": [{"test": test, "reason": reason} for test, reason in self.paused],
+            "by_persona_attribute": self.by_persona_attribute,
         }
 
 
@@ -137,17 +148,18 @@ def status(study_dir: Path | str, test: str | None = None) -> StatusReport:
     ``board_busy``.
     """
 
-    def read(conn: sqlite3.Connection) -> tuple[list[str], list[dict], dict]:
+    def read(conn: sqlite3.Connection) -> tuple[list[str], list[dict], dict, dict]:
         with read_transaction(conn):
             tests = registered_tests(conn, test)
             if test is not None and not tests:
-                return [], [], {}
-            return tests, status_counts(conn, test), cost_footer(conn)
+                return [], [], {}, {}
+            return (tests, status_counts(conn, test), cost_footer(conn),
+                    persona_counts(conn, test))
 
     found = read_only(study_dir, read)
     if found is None:
-        found = ([], [], {"committed": Decimal(0), "ceiling": None, "paused": []})
-    tests, agent_rows, footer = found
+        found = ([], [], {"committed": Decimal(0), "ceiling": None, "paused": []}, {})
+    tests, agent_rows, footer, by_persona = found
     if test is not None and not tests:
         raise ConsortiumError("unknown_test", f"{test} is not a registered Test")
     return StatusReport(
@@ -156,7 +168,26 @@ def status(study_dir: Path | str, test: str | None = None) -> StatusReport:
         ceiling=footer["ceiling"],
         paused=list(footer["paused"]),
         test=test,
+        by_persona_attribute=_by_persona_attribute(study_dir, tests, by_persona),
     )
+
+
+def _by_persona_attribute(
+    study_dir: Path | str, tests: list[str], by_persona: dict[str, dict[str, dict[str, int]]]
+) -> dict[str, dict[str, dict[str, dict[str, int]]]] | None:
+    """Per Test, the attribute tallies of its Personas; None when the Panel cannot be
+    loaded (or lacks a Persona of the Trials). Reads only ``panel/personas/index.json``."""
+    if not by_persona:  # no Trials anywhere: no Panel needed
+        return {name: tally_by_attribute({}, {}) for name in tests}
+    try:
+        personas = {p.id: p for p in load_personas(study_dir)}
+    except ConsortiumError as err:
+        if err.code in ("panel_missing", "panel_invalid"):
+            return None
+        raise
+    if any(pid not in personas for counts in by_persona.values() for pid in counts):
+        return None  # a Persona of the Trials is not in the Panel
+    return {name: tally_by_attribute(by_persona.get(name, {}), personas) for name in tests}
 
 
 def _cell(row: dict[str, Any], column: str) -> str:

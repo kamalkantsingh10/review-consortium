@@ -2,7 +2,8 @@
 title: 'Story 2.1 — Provider failure handling and refusals'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'af8626b40083b56f8661e5dd00975bb00508c866'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -70,15 +71,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/raters/base.py`, `config/models.py`, `raters/fake.py` -- `Category`; `RetryPolicy`; the Fake rates and simulated outcomes.
-- [ ] `src/consortium/board/trials.py` -- Add `record_transient(trial_id, attempt)` (category plus `answered_at`) and `attempt_counts(trial_id) -> (invalid, transient)`. Make `settlement`, `settle_exhausted` and `load_resumable` count-based with the total cap, and skip collecting a recorded-transient latest attempt.
-- [ ] `src/consortium/engine/dispatch.py`, `stages/open.py` -- Category handling and a pure `backoff_delay`. `dispatch` takes `retry: RetryPolicy`. `open` passes the policy and the Fake rates.
-- [ ] `src/consortium/core/personas.py` -- Move the `persona_<field>` value mapping here as `attribute_values(persona)`, and add a pure `tally_by_attribute(counts_by_persona, personas)`. Export reuses it.
-- [ ] `src/consortium/board/queries.py`, `stages/status.py` -- Add a per-persona `{trials, refused, failed}` query, and add `by_persona_attribute` to the JSON output.
-- [ ] `src/consortium/stages/export.py` -- Write `exports/<test>-attrition.csv` with `tally_by_attribute` (persona) plus Model and Condition tallies.
-- [ ] `docs/INTERFACE.md` -- Update Run step 8, retries, Resume, Trial states, `session.retry`, the Fake rates, the status JSON and the export.
-- [ ] `tests/test_failures.py` -- Every matrix row, using the FakeRater and the `backoff_initial_s: 0` setting, plus `backoff_delay` determinism and bounds.
-- [ ] `tests/test_fake.py`, `test_config.py`, `test_status.py`, `test_export.py` -- Independent rate draws, config bounds, `by_persona_attribute` (no Condition key), the attrition sidecar (columns, counts, no file on refusal).
+- [x] `src/consortium/raters/base.py`, `config/models.py`, `raters/fake.py` -- `Category`; `RetryPolicy`; the Fake rates and simulated outcomes.
+- [x] `src/consortium/board/trials.py` -- Add `record_transient(trial_id, attempt)` (category plus `answered_at`) and `attempt_counts(trial_id) -> (invalid, transient)`. Make `settlement`, `settle_exhausted` and `load_resumable` count-based with the total cap, and skip collecting a recorded-transient latest attempt.
+- [x] `src/consortium/engine/dispatch.py`, `stages/open.py` -- Category handling and a pure `backoff_delay`. `dispatch` takes `retry: RetryPolicy`. `open` passes the policy and the Fake rates.
+- [x] `src/consortium/core/personas.py` -- Move the `persona_<field>` value mapping here as `attribute_values(persona)`, and add a pure `tally_by_attribute(counts_by_persona, personas)`. Export reuses it.
+- [x] `src/consortium/board/queries.py`, `stages/status.py` -- Add a per-persona `{trials, refused, failed}` query, and add `by_persona_attribute` to the JSON output.
+- [x] `src/consortium/stages/export.py` -- Write `exports/<test>-attrition.csv` with `tally_by_attribute` (persona) plus Model and Condition tallies.
+- [x] `docs/INTERFACE.md` -- Update Run step 8, retries, Resume, Trial states, `session.retry`, the Fake rates, the status JSON and the export.
+- [x] `tests/test_failures.py` -- Every matrix row, using the FakeRater and the `backoff_initial_s: 0` setting, plus `backoff_delay` determinism and bounds.
+- [x] `tests/test_fake.py`, `test_config.py`, `test_status.py`, `test_export.py` -- Independent rate draws, config bounds, `by_persona_attribute` (no Condition key), the attrition sidecar (columns, counts, no file on refusal).
 
 **Acceptance Criteria:**
 - Given Fake rates for transient, refusal and fatal results, when a Run completes, then it needs no operator action and every Trial is `valid`, `invalid`, `refused` or `failed`.
@@ -90,6 +91,21 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC | Unknown category skips the Archive and cost record | medium | patch (archive first, then adapter_error) |
+| 2 | BH | Worst-case estimate ignores transient retries | medium | patch |
+| 3 | BH, EC | Ceiling pause waits out every backoff sleep | medium | patch (pause event) |
+| 4 | EC | Infinite backoff accepted, so the Run hangs | medium | patch |
+| 5 | BH, EC | CSV and sidecar replaced non-atomically | low | patch |
+| 6 | BH | Sidecar name can collide with an `<x>-attrition` Test | low | patch (refuse such names) |
+| 7 | BH | Attrition lacks invalid, a failed-cause split and an Instrument dimension | medium | patch |
+| 8 | BH, VG | Bare KeyError hides bugs as "no Panel" | low | patch |
+| 9 | BH | retry_left("ok") naming; jitter range inconsistent; refused-invariant wording | low | patch |
+| 10 | BH | Status JSON additive key / sidecar version | low | patch (docs + version column) |
+| 11 | VG, BH | Retry config through open/resume, resume categories, mixed cap and value order untested; weak config test; template-order slicing | medium | patch (tests) |
+| 12 | BH | Two queries per Trial on resume | low | Rejected: performance only |
 
 ## Design Notes
 

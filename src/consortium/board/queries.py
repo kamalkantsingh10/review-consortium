@@ -22,6 +22,7 @@ from consortium.board.ledger import (
 )
 from consortium.board.trials import TRIAL_STATES, chosen_answer, load_trials
 from consortium.core.errors import ConsortiumError
+from consortium.core.personas import ATTRITION_COUNTS, count_trial
 
 
 @contextmanager
@@ -105,6 +106,39 @@ def status_counts(conn: sqlite3.Connection, test: str | None = None) -> list[dic
     return out
 
 
+def persona_counts(
+    conn: sqlite3.Connection, test: str | None = None
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Per Test, per Persona: ``core.personas.ATTRITION_COUNTS`` Trial counts (story 2.1).
+
+    Returns ``{test: {persona_id: counts}}``; Tests by name, Personas in natural ID
+    order (``p2`` before ``p10``). A ``failed`` Trial is split by its last attempt's
+    category (``core.personas.count_trial``). ``test`` limits it to one Test.
+    """
+    args: tuple[str, ...] = (test,) if test is not None else ()
+    where = "WHERE t.test = ?" if test is not None else ""
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    with read_transaction(conn):
+        rows = conn.execute(
+            "SELECT t.test, t.persona_id, t.state, a.category FROM trials t"
+            " LEFT JOIN attempts a ON a.trial_id = t.trial_id AND a.attempt = t.attempt"
+            f" {where}",
+            args,
+        ).fetchall()
+    for name, persona_id, state, category in sorted(
+        rows, key=lambda r: (r[0], _persona_order(r[1]))
+    ):
+        acc = out.setdefault(name, {}).setdefault(
+            persona_id, dict.fromkeys(ATTRITION_COUNTS, 0))
+        count_trial(acc, state, category)
+    return out
+
+
+def _persona_order(persona_id: str) -> tuple:
+    digits = persona_id[1:]
+    return (0, int(digits), "") if digits.isdigit() else (1, 0, persona_id)
+
+
 def cost_footer(conn: sqlite3.Connection) -> dict[str, Any]:
     """Study-wide ``{"committed": Decimal, "ceiling": Decimal | None, "paused": [(test, reason)]}``.
 
@@ -135,8 +169,8 @@ def export_trials(conn: sqlite3.Connection, test: str) -> list[dict[str, Any]]:
       (``trials.chosen_answer``) for a ``valid`` Trial, else ``None``;
     - ``exported_attempt``: that attempt for a ``valid`` Trial, else the last
       attempt (``attempt``; 0 when none was ever started);
-    - ``seed``, ``timestamp``: the exported attempt's seed and ``answered_at``
-      (falling back to ``sent_at``); ``None`` when no attempt was started.
+    - ``seed``, ``timestamp``, ``category``: the exported attempt's seed, ``answered_at``
+      (falling back to ``sent_at``) and category; ``None`` when no attempt was started.
       ``board_unreadable`` when ``attempt`` > 0 has no ``attempts`` row.
 
     Rows are in plan order; one read transaction.
@@ -148,7 +182,7 @@ def export_trials(conn: sqlite3.Connection, test: str) -> list[dict[str, Any]]:
             chosen = chosen_answer(conn, row["trial_id"]) if row["state"] == "valid" else None
             exported = chosen["attempt"] if chosen is not None else row["attempt"]
             found = conn.execute(
-                "SELECT seed, coalesce(answered_at, sent_at) FROM attempts"
+                "SELECT seed, coalesce(answered_at, sent_at), category FROM attempts"
                 " WHERE trial_id = ? AND attempt = ?",
                 (row["trial_id"], exported),
             ).fetchone()
@@ -157,12 +191,13 @@ def export_trials(conn: sqlite3.Connection, test: str) -> list[dict[str, Any]]:
                     "board_unreadable",
                     f"Trial {row['trial_id']}: attempt {exported} has no attempts row",
                 )
-            seed, timestamp = found if found is not None else (None, None)
+            seed, timestamp, category = found if found is not None else (None, None, None)
             out.append({
                 **row,
                 "answers": chosen["answers"] if chosen is not None else None,
                 "exported_attempt": exported,
                 "seed": seed,
                 "timestamp": timestamp,
+                "category": category,
             })
     return out

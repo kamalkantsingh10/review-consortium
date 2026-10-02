@@ -85,3 +85,59 @@ def test_fake_module_has_no_network_imports() -> None:
     text = Path(fake.__file__).read_text()
     for name in ("socket", "http", "urllib", "requests", "httpx"):
         assert f"import {name}" not in text
+
+
+# --------------------------------------------------------------------------- story 2.1 outcomes
+
+
+def test_outcome_rates_draw_from_independent_streams() -> None:
+    from consortium.raters.fake import fake_category, is_invalid_attempt
+
+    seeds = range(4000)
+    transient = {s for s in seeds if fake_category(s, transient_rate=0.5) == "transient"}
+    refused = {s for s in seeds if fake_category(s, refusal_rate=0.5) == "refused"}
+    fatal = {s for s in seeds if fake_category(s, fatal_rate=0.5) == "fatal"}
+    invalid = {s for s in seeds if is_invalid_attempt(s, 0.5)}
+    for hits in (transient, refused, fatal, invalid):
+        assert 1800 < len(hits) < 2200
+    # Independent: each pair overlaps about a quarter of the seeds, never identically.
+    for a, b in ((transient, refused), (transient, fatal), (refused, fatal),
+                 (transient, invalid), (refused, invalid), (fatal, invalid)):
+        assert a != b
+        assert 800 < len(a & b) < 1200
+    # Order fatal, refused, transient: a higher-priority hit wins, the others are unchanged.
+    for s in seeds:
+        got = fake_category(s, transient_rate=0.5, refusal_rate=0.5, fatal_rate=0.5)
+        want = ("fatal" if s in fatal else "refused" if s in refused
+                else "transient" if s in transient else "ok")
+        assert got == want
+    assert {fake_category(s) for s in seeds} == {"ok"}
+    assert {fake_category(s, fatal_rate=1) for s in seeds} == {"fatal"}
+
+
+def test_simulated_outcomes_in_handle_and_collect() -> None:
+    req = _request(LIKERT, ("c_aaaaaaaa",))
+
+    async def run(rater: FakeRater, attempt: int):
+        (handle,) = await rater.submit([RaterCall("t/x/r1/t1", attempt, 42, req, ())])
+        stored = json.loads(canonical_json(handle).decode())
+        (result,) = await FakeRater(input_tokens=5, output_tokens=7).collect([stored])
+        return handle, result
+
+    for kind, kw in (("transient", {"transient_rate": 1.0}), ("refused", {"refusal_rate": 1.0}),
+                     ("fatal", {"fatal_rate": 1.0})):
+        handle, result = asyncio.run(run(FakeRater(input_tokens=5, output_tokens=7, **kw), 1))
+        assert handle["category"] == result.category == kind
+        assert result.usage == {"input_tokens": 0, "output_tokens": 0}
+        assert result.model_build == FAKE_BUILD
+        assert result.raw.startswith("simulated ")
+    _, odd = asyncio.run(run(FakeRater(transient_rate=1.0), 1))
+    _, even = asyncio.run(run(FakeRater(transient_rate=1.0), 2))
+    assert odd.raw.startswith("simulated rate limit")
+    assert even.raw.startswith("simulated transport error")
+    handle, ok = asyncio.run(run(FakeRater(input_tokens=5, output_tokens=7), 1))
+    assert (handle["category"], ok.category, ok.raw) == ("ok", "ok", fake_answer(req, 42))
+    assert ok.usage == {"input_tokens": 5, "output_tokens": 7}
+    legacy = {k: v for k, v in handle.items() if k != "category"}  # a handle from before 2.1
+    (old,) = asyncio.run(FakeRater().collect([legacy]))
+    assert old.category == "ok"

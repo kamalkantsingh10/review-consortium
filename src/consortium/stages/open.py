@@ -53,6 +53,7 @@ from consortium.board.tests import get_test, paused_reason, set_paused
 from consortium.board.trials import (
     MODEL_PURPOSE,
     TERMINAL_STATES,
+    RetryCaps,
     attempt_seeds,
     count_trials,
     insert_plan,
@@ -71,7 +72,13 @@ from consortium.config.load import (
     load_study,
 )
 from consortium.config.load import load_test as load_test_file
-from consortium.config.models import InstrumentDef, PricesConfig, StudyConfig, TestConfig
+from consortium.config.models import (
+    InstrumentDef,
+    PricesConfig,
+    RetryPolicy,
+    StudyConfig,
+    TestConfig,
+)
 from consortium.core.cost import PlanEstimate, estimate_plan, usd
 from consortium.core.errors import ConsortiumError
 from consortium.core.plan import Plan, Trial, plan_test
@@ -416,7 +423,7 @@ class _Resumable:
 
 def _load_resumable(study: Path, test: str, ctx: _Context) -> _Resumable:
     def read(conn):
-        return load_trials(conn, test), load_resumable(conn, test, 1 + ctx.max_retries)
+        return load_trials(conn, test), load_resumable(conn, test, ctx.caps)
 
     rows, todo = read_only(study, read) or ([], [])
     if not rows:
@@ -629,7 +636,7 @@ def _resume(
             states, committed_after, paused = asyncio.run(
                 _dispatch_resume(study, ctx_now.cfg, test, pairs, res_now.collect, raters_now,
                                  writer_spy, budget, new_ceiling, ctx_now.max_retries,
-                                 res_now.settles)
+                                 res_now.settles, ctx_now.cfg.session.retry)
             )
     return dataclasses.replace(summary, states=states, committed=committed_after, paused=paused)
 
@@ -652,6 +659,7 @@ async def _dispatch_resume(
     new_ceiling: Decimal | None,
     max_retries: int,
     settles: list[tuple[str, int, str]],
+    retry: RetryPolicy,
 ) -> tuple[dict[str, int], Decimal, str | None]:
     async with start_writer(study, spy=writer_spy) as writer:
         if new_ceiling is not None:
@@ -669,7 +677,7 @@ async def _dispatch_resume(
             paused = await dispatch(
                 study, pairs, raters, writer=writer, seed=cfg.seed,
                 concurrency=cfg.concurrency, collect=collect, budget=budget,
-                max_retries=max_retries,
+                max_retries=max_retries, retry=retry,
             )
         if paused is None:  # the pause is cleared only once the resume did not pause again
             await writer.do("set_paused", lambda conn: set_paused(conn, test, None))
@@ -681,7 +689,8 @@ async def _dispatch_resume(
 
 def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
     """``model_id -> Rater``. Only ``fake`` exists so far: one ``FakeRater`` per Model,
-    reporting that Model's ``fake`` usage (they share the provider's semaphore)."""
+    reporting that Model's ``fake`` usage and simulating its ``fake`` rates (they share
+    the provider's semaphore)."""
     out: dict[str, Rater] = {}
     for model_id in model_ids:
         model = cfg.model_by_id(model_id)
@@ -691,8 +700,11 @@ def raters_for(cfg: StudyConfig, model_ids: list[str]) -> dict[str, Rater]:
                 f"model {model_id}: provider {model.provider!r} has no adapter yet (Epic 2)",
             )
         fake = model.fake_settings
-        out[model_id] = FakeRater(input_tokens=fake.input_tokens, output_tokens=fake.output_tokens,
-                                  invalid_rate=fake.invalid_rate)
+        out[model_id] = FakeRater(
+            input_tokens=fake.input_tokens, output_tokens=fake.output_tokens,
+            invalid_rate=fake.invalid_rate, transient_rate=fake.transient_rate,
+            refusal_rate=fake.refusal_rate, fatal_rate=fake.fatal_rate,
+        )
     return out
 
 
@@ -820,7 +832,7 @@ async def _dispatch_all(
             )
         paused = await dispatch(
             study, pairs, raters, writer=writer, seed=cfg.seed, concurrency=cfg.concurrency,
-            budget=budget, max_retries=max_retries,
+            budget=budget, max_retries=max_retries, retry=cfg.session.retry,
         )
         states, committed = await writer.do(
             "state_counts", lambda conn: (state_counts(conn, plan.test), committed_usd(conn))
@@ -875,6 +887,11 @@ class _Context:
     clip_seconds: dict[str, float]
     max_retries: int  # the Test's effective session.max_retries
 
+    @property
+    def caps(self) -> RetryCaps:
+        """The retry budgets: ``max_retries`` and ``study.yaml`` ``session.retry``."""
+        return RetryCaps(self.max_retries, self.cfg.session.retry.transient_retries)
+
     def estimate(
         self, trials: Sequence[Trial], requests: Iterator[TrialRequest]
     ) -> PlanEstimate:
@@ -882,6 +899,7 @@ class _Context:
         return estimate_plan(
             trials, requests, self.cfg, self.prices, self.clip_seconds,
             max_retries=self.max_retries,
+            transient_retries=self.cfg.session.retry.transient_retries,
         )
 
     def uncapped_ok(self, model_ids: Sequence[str]) -> bool:

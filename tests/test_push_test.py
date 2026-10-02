@@ -613,10 +613,18 @@ def test_pairwise_practice_same_clip_twice(study: Path, tmp_path: Path) -> None:
     assert _refused(study, src, "bad_practice").message.startswith("practice[0]: ")
 
 
-@pytest.mark.parametrize("name", ["a" * 65, "pilot-", "pilot_"])
+@pytest.mark.parametrize("name", ["a" * 65, "pilot-", "pilot_", "pilot1-attrition"])
 def test_bad_name_length_and_trailing(study: Path, tmp_path: Path, name: str) -> None:
     src = _write(tmp_path / "e", name, instruments=["godspeed"])
     _refused(study, src, "bad_test_name")
+
+
+def test_attrition_suffix_message(study: Path, tmp_path: Path) -> None:
+    src = _write(tmp_path / "e", "x-attrition", instruments=["godspeed"])
+    err = _refused(study, src, "bad_test_name")
+    assert "-attrition" in err.message
+    assert push_test(study, _write(tmp_path / "f", "attrition-x", **_godspeed_fields(study))) \
+        == "attrition-x"
 
 
 def test_name_at_64_characters_ok(study: Path, tmp_path: Path) -> None:

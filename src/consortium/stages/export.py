@@ -3,7 +3,8 @@
 Reads ``board.db`` read-only and lease-free (``board.db.read_only``, one read
 transaction), so it works while another Test is dispatching. It refuses
 (``sessions_running``) while any Trial of the Test is ``planned`` or ``sent``,
-and writes only ``exports/<test>.csv`` (a unique temporary file, then ``os.replace``).
+and writes only ``exports/<test>.csv`` and its attrition sidecar
+``exports/<test>-attrition.csv`` (each a unique temporary file, then ``os.replace``).
 
 One row per Item per Trial, ordered by ``session_id`` (natural order, so
 ``p2`` before ``p10``), ``trial_index`` and the Instrument's Item order. A
@@ -15,6 +16,12 @@ the board, Panel and Instrument checks but before the Condition-column and
 stored-answer checks (AD-2); they are never logged. A target Clip with no row
 in ``blinding_key.csv`` exports empty Condition cells. Practice clips and their
 intended answers are never exported (Trials hold target Clips only).
+
+The attrition sidecar (story 2.1) counts Trials, ``invalid``, ``refused`` and
+``failed`` (split by kind) per Model (``model_id``), per Persona attribute
+(``persona_<field>``), per Condition column and per Instrument, so differential
+attrition stays visible. Conditions appear
+only here and in the tidy CSV, never in ``status``.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import os
 import re
 import sqlite3
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +52,15 @@ from consortium.config.load import (
 )
 from consortium.config.models import InstrumentDef, StudyConfig
 from consortium.core.errors import ConsortiumError
-from consortium.core.personas import TRAITS, Persona, render_card
+from consortium.core.personas import (
+    ATTRITION_COUNTS,
+    Persona,
+    attribute_names,
+    attribute_values,
+    count_trial,
+    render_card,
+    tally_by_attribute,
+)
 
 log = logging.getLogger(__name__)
 
@@ -54,28 +69,9 @@ EXPORTS_DIR = "exports"
 RUNNING_STATES = ("planned", "sent")
 
 
-def _persona_fields() -> list[tuple[str, Callable[[Persona], str]]]:
-    """``(column, value of a Persona)`` per ``Persona`` field except ``id``, in field order;
-    ``big_five`` gives one ``persona_<trait>`` per trait."""
-    out: list[tuple[str, Callable[[Persona], str]]] = []
-    for name in Persona.model_fields:
-        if name == "id":
-            continue
-        if name == "big_five":
-            out.extend(
-                (f"persona_{trait}", lambda p, t=trait: p.big_five[t]) for trait in TRAITS
-            )
-        else:
-            out.append((f"persona_{name}", lambda p, n=name: getattr(p, n)))
-    return out
-
-
-PERSONA_FIELDS = tuple(_persona_fields())
-
-
 def persona_columns() -> list[str]:
     """``persona_<field>`` per ``Persona`` field except ``id``; ``big_five`` one per trait."""
-    return [column for column, _value in PERSONA_FIELDS]
+    return attribute_names()
 
 
 HEAD_COLUMNS = (
@@ -91,10 +87,6 @@ FIXED_COLUMNS = frozenset((*HEAD_COLUMNS, *TAIL_COLUMNS))
 
 def _natural(text: str) -> tuple:
     return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in re.split(r"(\d+)", text))
-
-
-def _persona_values(persona: Persona) -> dict[str, str]:
-    return {column: value(persona) for column, value in PERSONA_FIELDS}
 
 
 def _read_board(study: Path, test: str) -> tuple[str, list[dict], dict]:
@@ -211,8 +203,7 @@ def _rows(
 ) -> list[list[str]]:
     out = []
     columns = [*HEAD_COLUMNS, *(c for c, _f, _s in conditions), *TAIL_COLUMNS]
-    ordered = sorted(trials, key=lambda t: (_natural(t["session_id"]), t["trial_index"]))
-    for t in ordered:
+    for t in _ordered(trials):
         clip_ids = tuple(t["clip_ids"])
         pairwise = t["pair_id"] is not None
         if len(clip_ids) != (2 if pairwise else 1) or not all(isinstance(c, str) for c in clip_ids):
@@ -228,7 +219,7 @@ def _rows(
             "pair_id": t["pair_id"],
             "clip_id_a": clip_ids[0] if pairwise else None,
             "clip_id_b": clip_ids[1] if pairwise else None,
-            **_persona_values(personas[t["persona_id"]]),
+            **attribute_values(personas[t["persona_id"]]),
             "model": t["model_id"],
             "instrument": t["instrument"],
             "position": t["position"],
@@ -278,6 +269,67 @@ def _rows(
     return out
 
 
+ATTRITION_SCHEMA_VERSION = 1
+ATTRITION_COLUMNS = ("schema_version", "dimension", "attribute", "value", *ATTRITION_COUNTS)
+
+
+def _ordered(trials: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The Trials in tidy-CSV order: natural ``session_id``, then ``trial_index``."""
+    return sorted(trials, key=lambda t: (_natural(t["session_id"]), t["trial_index"]))
+
+
+def _tally(groups: dict[str, dict[str, int]], value: str, t: Mapping[str, Any]) -> None:
+    acc = groups.setdefault(value, dict.fromkeys(ATTRITION_COUNTS, 0))
+    count_trial(acc, t["state"], t["category"])
+
+
+def _condition_value(
+    t: Mapping[str, Any], key: Mapping[str, Mapping[str, str]], factor: str, side: int | None
+) -> str:
+    """The Trial's cell in a Condition column, as in the tidy CSV (empty when n/a)."""
+    clip_ids = tuple(t["clip_ids"])
+    if (side is None) == (t["pair_id"] is not None):
+        return ""
+    clip = clip_ids[0] if side is None else clip_ids[side]
+    return _cell(key.get(clip, {}).get(factor))
+
+
+def _attrition_rows(
+    trials: Sequence[Mapping[str, Any]],
+    personas: Mapping[str, Persona],
+    key: Mapping[str, Mapping[str, str]],
+    conditions: Sequence[tuple[str, str, int | None]],
+) -> list[list[str]]:
+    """``ATTRITION_COLUMNS`` rows: per Model, per Persona attribute, per Condition column,
+    per Instrument.
+
+    Values are in the order first seen in the tidy CSV.
+    """
+    ordered = _ordered(trials)
+    models: dict[str, dict[str, int]] = {}
+    by_persona: dict[str, dict[str, int]] = {}
+    by_condition: dict[str, dict[str, dict[str, int]]] = {c: {} for c, _f, _s in conditions}
+    by_instrument: dict[str, dict[str, int]] = {}
+    for t in ordered:
+        _tally(models, t["model_id"], t)
+        _tally(by_persona, t["persona_id"], t)
+        for column, factor, side in conditions:
+            _tally(by_condition[column], _condition_value(t, key, factor, side), t)
+        _tally(by_instrument, t["instrument"], t)
+    blocks: list[tuple[str, str, dict[str, dict[str, int]]]] = [("model", "model_id", models)]
+    for name, values in tally_by_attribute(by_persona, personas).items():
+        blocks.append(("persona", name, values))
+    for column, values in by_condition.items():
+        blocks.append(("condition", column, values))
+    blocks.append(("instrument", "instrument", by_instrument))
+    return [
+        [str(ATTRITION_SCHEMA_VERSION), dimension, attribute, value,
+         *(str(counts[c]) for c in ATTRITION_COUNTS)]
+        for dimension, attribute, values in blocks
+        for value, counts in values.items()
+    ]
+
+
 def _log_rates(rates: Mapping[str, Mapping[str, Any]], threshold: float) -> None:
     def fmt(rate: float | None) -> str:
         return "n/a" if rate is None else f"{rate:.4f}"
@@ -295,29 +347,36 @@ def _log_rates(rates: Mapping[str, Mapping[str, Any]], threshold: float) -> None
             )
 
 
-def _write(path: Path, header: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
-    """Write via a unique temporary file in the same folder, fsync it, rename, fsync the folder."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(header)
-    writer.writerows(rows)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp = Path(name)
+def _write(files: Sequence[tuple[Path, Sequence[str], Sequence[Sequence[str]]]]) -> None:
+    """Write every ``(path, header, rows)`` together: each to a unique temporary file in
+    its folder, fsynced; only then rename them all and fsync the folders. On a failure
+    before the renames, every temporary file is removed and no target is touched."""
+    temps: list[tuple[Path, Path]] = []
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(buf.getvalue())
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        for path, header, rows in files:
+            buf = io.StringIO()
+            writer = csv.writer(buf, lineterminator="\n")
+            writer.writerow(header)
+            writer.writerows(rows)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+            temps.append((Path(name), path))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(buf.getvalue())
+                fh.flush()
+                os.fsync(fh.fileno())
+        for tmp, path in temps:
+            os.replace(tmp, path)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        for tmp, _path in temps:
+            tmp.unlink(missing_ok=True)
         raise
-    dir_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    for folder in dict.fromkeys(path.parent for _tmp, path in temps):
+        dir_fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _read_key(study: Path) -> dict[str, dict[str, str]]:
@@ -331,8 +390,18 @@ def _read_key(study: Path) -> dict[str, dict[str, str]]:
         ) from err
 
 
+def attrition_path(study_dir: Path | str, test: str) -> Path:
+    """``exports/<test>-attrition.csv``, the attrition sidecar of ``test``'s export."""
+    return Path(study_dir) / EXPORTS_DIR / f"{test}-attrition.csv"
+
+
 def export_test(study_dir: Path | str, test: str) -> Path:
     """Write ``exports/<test>.csv`` for the finished Test ``test`` and return its path.
+
+    Also writes the attrition sidecar ``exports/<test>-attrition.csv`` (columns
+    ``ATTRITION_COLUMNS``: Trial, invalid, refused and failed counts per Model, Persona
+    attribute, Condition column and Instrument), after every check, so a refusal writes
+    neither; both are written together (see ``_write``).
 
     Raises, in this order and before writing anything: ``unknown_test`` (not
     registered, or no ``board.db``), ``nothing_to_export`` (no Trials),
@@ -354,7 +423,8 @@ def export_test(study_dir: Path | str, test: str) -> Path:
     conditions = _condition_columns(key, trials)
     rows = _rows(trials, personas, instruments, key, conditions, kind)
     header = [*HEAD_COLUMNS, *(c for c, _f, _s in conditions), *TAIL_COLUMNS]
+    attrition = _attrition_rows(trials, personas, key, conditions)
     path = study / EXPORTS_DIR / f"{test}.csv"
-    _write(path, header, rows)
+    _write([(path, header, rows), (attrition_path(study, test), ATTRITION_COLUMNS, attrition)])
     _log_rates(rates, cfg.thresholds.invalid_rate_max)
     return path

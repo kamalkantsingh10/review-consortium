@@ -224,7 +224,7 @@ def test_json(ran: Path) -> None:
     assert result.exit_code == 0, result.stderr
     doc = json.loads(result.stdout)
     assert set(doc) == {"schema_version", "test", "rows", "committed", "ceiling", "state",
-                        "paused"}
+                        "paused", "by_persona_attribute"}
     assert (doc["schema_version"], doc["test"]) == (1, None)
     assert (doc["committed"], doc["ceiling"], doc["state"], doc["paused"]) == (
         "0", None, "ok", [])
@@ -390,7 +390,7 @@ def test_no_board_yet(tmp_path: Path) -> None:
     assert not (study / DB_FILE).exists()
     doc = json.loads(_cli(study, "--json").stdout)
     assert doc == {"schema_version": 1, "test": None, "rows": [], "committed": "0",
-                   "ceiling": None, "state": "ok", "paused": []}
+                   "ceiling": None, "state": "ok", "paused": [], "by_persona_attribute": {}}
     unknown = _cli(study, "pilot1")
     assert unknown.exit_code == 1 and unknown.stdout == ""
     assert unknown.stderr.startswith("unknown_test: pilot1")
@@ -428,3 +428,96 @@ def test_format_table_exact_text() -> None:
         "       12                     1.5",
         "footer line",
     ]
+
+
+# --------------------------------------------------------------------------- story 2.1
+
+
+def _expected_by_attribute(study: Path, test: str) -> dict:
+    from consortium.config.load import load_personas
+    from consortium.core.personas import ATTRITION_COUNTS, attribute_values, count_trial
+
+    personas = {p.id: p for p in load_personas(study)}
+    conn = connect(study)
+    try:
+        categories = dict(conn.execute(
+            "SELECT t.trial_id, a.category FROM trials t LEFT JOIN attempts a"
+            " ON a.trial_id = t.trial_id AND a.attempt = t.attempt"))
+    finally:
+        conn.close()
+    out: dict = {}
+    for t in _trials(study, test):
+        for name, value in attribute_values(personas[t["persona_id"]]).items():
+            acc = out.setdefault(name, {}).setdefault(value, dict.fromkeys(ATTRITION_COUNTS, 0))
+            count_trial(acc, t["state"], categories[t["trial_id"]])
+    return out
+
+
+def test_json_by_persona_attribute(study: Path) -> None:
+    from consortium.core.personas import attribute_names
+
+    conn = connect(study)
+    try:
+        with transaction(conn):
+            conn.execute("UPDATE trials SET state = 'refused' WHERE persona_id = 'p1'")
+            conn.execute("UPDATE trials SET state = 'failed' WHERE persona_id IN ('p2', 'p3')"
+                         " AND instrument = 'godspeed'")
+    finally:
+        conn.close()
+    doc = json.loads(_cli(study, "--json").stdout)
+    by = doc["by_persona_attribute"]
+    assert set(by) == {"pilot1", "pilot2"}
+    assert by["pilot2"] == {name: {} for name in attribute_names()}  # never opened
+    pilot1 = by["pilot1"]
+    assert list(pilot1) == attribute_names()
+    assert all(name.startswith("persona_") for name in pilot1)  # no Condition, ever
+    assert pilot1 == _expected_by_attribute(study, "pilot1")
+    trials = len(_trials(study))
+    for values in pilot1.values():
+        assert sum(v["trials"] for v in values.values()) == trials
+        assert sum(v["refused"] for v in values.values()) == 2 * PER_AGENT  # p1 on m1 and m2
+        assert sum(v["failed"] for v in values.values()) == 2 * 2 * 2  # 2 Personas x 2 x 2
+    for values in pilot1.values():
+        for v in values.values():
+            assert v["failed"] == v["failed_fatal"] + v["failed_transient"] + v["failed_exhausted"]
+    one = json.loads(_cli(study, "pilot1", "--json").stdout)
+    assert one["by_persona_attribute"] == {"pilot1": pilot1}
+    text = _cli(study).stdout
+    assert "persona_" not in text  # the table is unchanged
+
+
+def test_json_by_persona_attribute_null_without_panel(study: Path) -> None:
+    (study / "panel" / "personas" / "index.json").unlink()
+    result = _cli(study, "--json")
+    assert result.exit_code == 0, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["by_persona_attribute"] is None
+    assert doc["rows"]  # status still works
+    assert _cli(study).exit_code == 0
+
+
+def test_status_never_reads_blinding_key(study: Path, monkeypatch) -> None:
+    from consortium.board import blinding
+
+    def boom(*_a, **_k):
+        raise AssertionError("status read the blinding key")
+
+    monkeypatch.setattr(blinding, "read_key", boom)
+    assert _cli(study, "--json").exit_code == 0
+
+
+def test_by_persona_attribute_value_order(ran: Path) -> None:
+    """Values appear in the order first seen over the Personas in natural ID order."""
+    import re
+
+    from consortium.config.load import load_personas
+    from consortium.core.personas import attribute_values
+
+    personas = {p.id: p for p in load_personas(ran)}
+    used = sorted({t["persona_id"] for t in _trials(ran)},
+                  key=lambda pid: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", pid)])
+    assert used[:3] == ["p1", "p2", "p3"] and "p10" in used
+    by = status(ran).by_persona_attribute["pilot1"]
+    for name, values in by.items():
+        expected = list(dict.fromkeys(attribute_values(personas[pid])[name] for pid in used))
+        assert list(values) == expected, name

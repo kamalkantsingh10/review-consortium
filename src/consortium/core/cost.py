@@ -114,12 +114,14 @@ class PlanEstimate:
     trials: int
     providers: tuple[str, ...]  # providers that receive Clips, in first-Trial order
     max_retries: int
+    transient_retries: int = 0
 
     def lines(self) -> list[str]:
         """The estimate as printed by ``consortium open`` (identical for a dry run and a Run)."""
         return [
             f"cost estimate: expected {usd(self.expected)} USD, worst case "
-            f"{usd(self.worst_case)} USD (max_retries {self.max_retries})",
+            f"{usd(self.worst_case)} USD (max_retries {self.max_retries}, "
+            f"transient_retries {self.transient_retries})",
             f"cost covers: {self.trials} Trials; Clips go to: "
             f"{', '.join(self.providers) or 'none'}",
         ]
@@ -133,11 +135,13 @@ def estimate_plan(
     clip_seconds: Mapping[str, float],
     *,
     max_retries: int,
+    transient_retries: int = 0,
 ) -> PlanEstimate:
     """Sum ``estimate`` over every Trial of ``plan`` (a ``Plan`` or a sequence of Trials).
 
     ``requests`` are the Trials' rendered requests in the same order (consumed
-    once). ``worst_case`` is ``expected x (1 + max_retries)``.
+    once). ``worst_case`` is ``expected x (1 + max_retries + transient_retries)``, every
+Trial taking its maximum number of attempts.
     """
     trials: Sequence[Trial] = plan.trials if hasattr(plan, "trials") else plan
     total = Decimal(0)
@@ -151,10 +155,11 @@ def estimate_plan(
             providers.setdefault(model.provider)
     return PlanEstimate(
         expected=total,
-        worst_case=total * (1 + max_retries),
+        worst_case=total * (1 + max_retries + transient_retries),
         trials=count,
         providers=tuple(providers),
         max_retries=max_retries,
+        transient_retries=transient_retries,
     )
 
 

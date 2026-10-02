@@ -294,12 +294,21 @@ def _display_path(path: Path, study: Path) -> str:
         return str(path)
 
 
+RESERVED_TEST_SUFFIX = "-attrition"  # exports/<test>-attrition.csv is the export sidecar
+
+
 def _check_name(name: str, fail: Fail) -> None:
     if len(name) > TEST_NAME_MAX or not _TEST_NAME.fullmatch(name):
         raise fail(
             "bad_test_name",
             f"test: {name!r} must match {TEST_NAME_PATTERN} and be at most {TEST_NAME_MAX} "
             "characters (it is part of every Session ID)",
+        )
+    if name.endswith(RESERVED_TEST_SUFFIX):
+        raise fail(
+            "bad_test_name",
+            f"test: {name!r} must not end in {RESERVED_TEST_SUFFIX!r} (reserved for the "
+            "export's exports/<test>-attrition.csv)",
         )
 
 

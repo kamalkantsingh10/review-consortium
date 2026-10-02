@@ -216,7 +216,8 @@ def test_declined_on_terminal(study: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert f"Run {TRIALS} Trials on fake? [y/N]" in result.stderr
     assert "not_confirmed:" in result.stderr
     # The summary and cost estimate are printed before the question (story 1.9), no states.
-    assert "cost estimate: expected 0 USD, worst case 0 USD (max_retries 2)" in result.stdout
+    assert ("cost estimate: expected 0 USD, worst case 0 USD (max_retries 2, transient_retries 3)"
+            in result.stdout)
     assert "states:" not in result.stdout
     _nothing_written(study)
 
@@ -297,10 +298,11 @@ def test_main_refused(study: Path) -> None:
 
 def test_other_provider_unavailable(study: Path) -> None:
     cfg = study / "study.yaml"
-    text = cfg.read_text()
-    end = text.index("\n", text.index("      invalid_rate:")) + 1
-    text = text.replace(text[text.index("    fake:"):end], "")
-    cfg.write_text(text.replace("provider: fake ", "provider: gemini ", 1))
+    doc = yaml.safe_load(cfg.read_text())
+    model = doc["models"][0]
+    del model["fake"]
+    model["provider"] = "gemini"
+    cfg.write_text(yaml.safe_dump(doc, sort_keys=False))
     result = _cli("pilot1", "--yes", "--ceiling", "5", "--study", str(study))
     assert result.exit_code == 1
     assert result.stderr.startswith("provider_unavailable:")
@@ -413,7 +415,7 @@ def test_failed_trials_warn_but_exit_zero(study: Path, monkeypatch: pytest.Monke
 
     class _ErrorRater(FakeRater):
         async def collect(self, handles):
-            return [RaterResult(r.raw, r.usage, r.model_build, "error")
+            return [RaterResult(r.raw, r.usage, r.model_build, "fatal")
                     for r in await super().collect(handles)]
 
     monkeypatch.setattr(open_stage, "FakeRater", _ErrorRater)
@@ -606,9 +608,9 @@ def fresh_copy(study: Path) -> Path:
 
 
 def test_non_ok_category_fails(study: Path) -> None:
-    _run_engine(study, _CountingRater(category="error"), concurrency=4)
+    _run_engine(study, _CountingRater(category="fatal"), concurrency=4)
     assert {(t["state"], t["attempt"]) for t in _trials(study)} == {("failed", 1)}
-    assert {r["category"] for r in _lines(study, RESPONSES_FILE)} == {"error"}
+    assert {r["category"] for r in _lines(study, RESPONSES_FILE)} == {"fatal"}
 
 
 def test_terminal_states_never_change(study: Path) -> None:
