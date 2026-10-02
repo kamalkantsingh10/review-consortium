@@ -60,6 +60,45 @@ Ingests a video file into the Study **blind**: nothing on the rating side can le
 | Another process holds the `board.db` write lock past the 5 s busy timeout | `board_busy`, exit `1`, nothing stored |
 | `board.db` was written by a newer `consortium` | `board_version_mismatch`, exit `1`, nothing stored |
 
+### `consortium push test FILE [--study PATH]`
+
+Validates a Test YAML file (see [`tests/<name>.yaml`](#testsnameyaml)) against `board.db` and the Study's Instruments, then registers it under its `test:` name and prints that name.
+
+- `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
+- A `FILE` outside the Study's `tests/` folder is copied byte for byte to `tests/<name>.yaml`; a file already at `tests/<name>.yaml` is recorded in place. Registered Test files are never rewritten.
+- Registration stores the name, `kind`, the stored path, the SHA-256 of the file bytes and whether the Test is openable. A `kind: main` Test is registered **not openable**: `push test` logs `not_openable: Test <name> is kind main; not openable until Protocol lock (Epic 4)` to stderr, and `open` refuses it with `protocol_lock_unavailable` until the Protocol lock arrives (Epic 4). Pilot and screening Tests are openable.
+- Re-pushing a Test with identical bytes is a no-op that prints the name again, provided the stored `tests/<name>.yaml` still holds the registered bytes (else `test_exists`: the registered file is missing or was edited). The same holds when an identical push by another process registers first. Different bytes under a registered name are refused (`test_exists`); a changed Test needs a new name.
+- The file is read once; those bytes are validated, hashed and copied. If the file changes while it is being validated, the push is refused with `test_changed`.
+- On success, prints the Test name to stdout and exits `0`.
+- **Checks, in order; the first failure wins** and nothing is copied or registered:
+  1. **Name.** `test:` matches `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` (lowercase letters, digits, `_` and `-`, not starting or ending with `_` or `-`) and is at most 64 characters, since it is part of every Session ID — else `bad_test_name`. The pairing plan's syntax (`session.pairing`, duplicate Clip IDs) is also checked here, before the schema, as `bad_pairing`.
+  2. **Schema** (`load_test`, as for every config file): `config_invalid`, `unknown_instrument`.
+  3. **Registration.** Already registered with other bytes, or `tests/<name>.yaml` exists unregistered with other bytes — `test_exists`.
+  4. **References.** Every target Clip is pushed (`unknown_clip`, field `clips[i]`); every Practice Clip is pushed (`bad_practice`, field `practice[i]`).
+  5. **Plan.** The Test has at least 1 target Clip, and every pairwise Instrument has at least 2 — else `bad_pairing` (`clips: a Test needs at least 1 target Clip`). Pairing is always `all_pairs`.
+  6. **Practice.** A pairwise example may not list the same Clip twice (`bad_practice`, field `practice[i]`). No Clip is both a Practice clip and a target (`bad_practice`, field `practice`). Each Instrument of the Test has at least the effective `session.practice_clips` examples in `practice:` (`bad_practice`, field `practice[i]` naming that Instrument's last example, or `practice` when it has none). Trials use the first `session.practice_clips` examples of their Instrument, in list order; extra examples are allowed but unused.
+  7. **Overlap.** A target Clip may not be a target of both a `main` Test and a `pilot`/`screening` Test (`clip_kind_overlap`, naming the Clip and the other Test). Practice clips are exempt; pilot and screening Tests may share targets. A registered Test's kind is read from its registration.
+  8. **Media limits.** For every Model the Test uses and each Instrument, the worst-case Trial must fit the Model's `limits`: the used Practice clips of that Instrument plus the longest target (single-clip Instrument) or the two longest distinct targets (pairwise), chosen separately for seconds and for bytes. Seconds are the sum of the stored durations; bytes the sum of the stored sizes, or `4 * ceil(size / 3)` per Clip when `inline_base64` is true. A total equal to the limit fits. Else `media_limit_exceeded: <model> <limit> <allowed> < <total> (<n> practice + <single|pairwise> <clip ids>)`, for example `media_limit_exceeded: m2 max_seconds 300 < 480 (2 practice + pairwise c_aaaaaaaa,c_bbbbbbbb)`. `<n> practice` counts Practice Clips, not examples (one pairwise example adds 2). Totals are rounded to 6 decimals before the comparison. Durations and sizes come from `board.db`; no ffmpeg is run.
+- Errors name the Test file (relative to the Study folder) as their path. Every file-system or SQLite failure is `push_failed`. If `board.db` does not exist yet, a refused push does not create it. When `board.db` is at an older layout version, it is migrated on open (for example `1` to `2`) even if the push is then refused; no rows change.
+
+| Situation | Result |
+| --- | --- |
+| Valid pilot or screening Test | Registered openable, file at `tests/<name>.yaml`, name printed, exit `0` |
+| Valid `kind: main` Test | Registered not openable, `not_openable` note on stderr, name printed, exit `0` |
+| Same name, identical bytes, already registered | No-op, name printed, exit `0` |
+| Same name, different bytes | `test_exists`, exit `1` |
+| `test:` not matching `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or longer than 64 characters (for example `Pilot/1`, `pilot-`) | `bad_test_name`, exit `1` |
+| A target Clip ID that was never pushed | `unknown_clip: clips[i]: ...`, exit `1` |
+| An unknown Instrument | `unknown_instrument`, exit `1` |
+| No target Clips, a pairwise Instrument with fewer than 2 targets, duplicate Clip IDs, or `session.pairing` other than `all_pairs` | `bad_pairing`, exit `1` |
+| Same name, identical bytes, but the stored `tests/<name>.yaml` is missing or edited | `test_exists`, exit `1` |
+| The file changed while being validated | `test_changed`, exit `1` |
+| A Clip both in `practice` and `clips`; a Practice Clip never pushed; too few Practice examples | `bad_practice`, exit `1` |
+| A Practice answer failing the Instrument's response schema, or the wrong number of Practice Clips | `config_invalid: practice.<i>...` (from the Test schema), exit `1` |
+| Target shared between a `main` and a `pilot`/`screening` Test | `clip_kind_overlap`, exit `1` |
+| Worst-case Trial above a Model's `max_seconds` or `max_bytes` | `media_limit_exceeded`, exit `1` |
+| The file system or `board.db` fails (reading, checking or storing) | `push_failed`, exit `1`, nothing stored |
+
 ### `consortium personas generate [--study PATH] [--force]`
 
 Generates the Persona Panel from `study.yaml` (`seed` and `personas`) into `panel/personas/`. No network, no LLM: the cards are assembled from the approved wording file.
@@ -95,7 +134,7 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 | `ffmpeg_missing` | `push clip` | `ffmpeg` or `ffprobe` is not on `PATH`, cannot be run, or is older than version 6. |
 | `no_audio` | `push clip` | The input file has no audio stream. |
 | `media_unreadable` | `push clip` | The input file is missing, or ffmpeg cannot read or decode it. |
-| `push_failed` | `push clip` | The file system or SQLite failed while storing the Clip; nothing was stored. The message names no source path. |
+| `push_failed` | `push clip`, `push test` | The file system or SQLite failed while storing the Clip or Test; nothing was stored. For `push clip` the message names no source path. |
 | `board_busy` | any command that writes `board.db` | Another process holds the `board.db` lock past the busy timeout. Try again. |
 | `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
@@ -103,6 +142,14 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
 | `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
 | `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
 | `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
+| `bad_test_name` | `push test` | The Test name does not match `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$` or is longer than 64 characters. |
+| `test_changed` | `push test` | The Test file changed while it was being validated; nothing was registered. Push it again. |
+| `test_exists` | `push test` | A Test of that name is registered with different bytes, its registered `tests/<name>.yaml` is missing or was edited, or `tests/<name>.yaml` already exists unregistered with different bytes. |
+| `unknown_clip` | `push test` | A target Clip ID is not in `board.db` (field `clips[i]`). |
+| `bad_pairing` | `push test` | The pairing plan cannot be built: no target Clips, a pairwise Instrument with fewer than 2 targets, duplicate target Clip IDs, or a `session.pairing` other than `all_pairs`. |
+| `bad_practice` | `push test` | A Practice Clip is not pushed or is also a target, a pairwise example lists the same Clip twice, or an Instrument has fewer than `session.practice_clips` Practice examples. |
+| `clip_kind_overlap` | `push test` | A target Clip is already a target of a registered Test of the other side (`main` vs `pilot`/`screening`). |
+| `media_limit_exceeded` | `push test` | A worst-case Trial exceeds a Model's `limits.max_seconds` or `limits.max_bytes`. |
 | `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
 
 ## Study folder layout
@@ -112,7 +159,7 @@ Later commands read the Panel from `index.json` (never by re-deriving it); if it
   study.yaml           Study configuration: seed, Models (by id), defaults.        (init; schema in story 1.2)
   protocol.md          Study protocol.                                              (init; full template arrives in story 4.1)
   prices.yaml          Per-Model prices in USD.                                     (init; schema in story 1.2)
-  tests/*.yaml         Test definitions; init writes a pilot Test, example.yaml.    (init; schema in story 1.2, registration in 1.5)
+  tests/*.yaml         Test definitions; init writes a pilot Test, example.yaml.    (init; schema in story 1.2; push test)
   instruments/*.yaml   Optional user Instruments.                                   (story 1.2)
   panel/personas/      Persona cards (p<n>.md), index.json and meta.json.            (personas generate)
   panel/               Screening snapshot.                                          (arrives in story 4.1)
@@ -153,7 +200,7 @@ One canonical MP4 per Clip, written by `push clip`. The file name is the Clip ID
 
 ### `board.db`
 
-SQLite in WAL mode; the only mutable Study state, created by the first `push clip`. Its layout version is `PRAGMA user_version` (currently `1`). Table `clips`, one row per Clip:
+SQLite in WAL mode; the only mutable Study state, created by the first `push clip` or successful `push test`. Its layout version is `PRAGMA user_version` (currently `2`; older files are migrated forward when opened). Table `clips` (version 1), one row per Clip:
 
 | Column | Meaning |
 | --- | --- |
@@ -165,6 +212,19 @@ SQLite in WAL mode; the only mutable Study state, created by the first `push cli
 | `fps` | Frame rate of the stored file. |
 | `loudness_lufs` | Integrated loudness (EBU R128), measured once at push; empty when it is -inf (digital silence). |
 | `pushed_at` | UTC ISO 8601 time with `Z`. |
+
+Table `tests` (version 2), one row per registered Test:
+
+| Column | Meaning |
+| --- | --- |
+| `name` | Primary key, the Test's `test:` name. |
+| `kind` | `pilot`, `screening` or `main`. |
+| `path` | The registered file, `tests/<name>.yaml`. |
+| `sha256` | SHA-256 (lowercase hex) of the file bytes. |
+| `openable` | `1`, or `0` for `kind: main` (not openable until the Protocol lock, Epic 4). |
+| `registered_at` | UTC ISO 8601 time with `Z`. |
+
+Table `test_clips` (version 2), one row per Test and Clip it uses: `test`, `clip_id`, `role` (`target` or `practice`; every Practice Clip listed in `practice:` is recorded, used or not).
 
 `board.db` never holds a Condition, the source file name or a hash of the source file.
 
@@ -242,12 +302,12 @@ Every sentence and phrase must be a single line (no line break of any kind, incl
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | *Required.* `1`. |
-| `test` | *Required.* The Test name (letters, digits, `_`, `-`); must equal the file name without `.yaml`. |
+| `test` | *Required.* The Test name; must equal the file name without `.yaml`. The schema accepts letters, digits, `_` and `-`; `push test` requires `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`, at most 64 characters (lowercase, no leading or trailing `_`/`-`; `bad_test_name`), since the name is part of every Session ID. |
 | `kind` | *Required.* `pilot`, `screening` or `main`. |
 | `instruments` | *Required.* Non-empty list of Instrument names; each must resolve and be enabled in `study.yaml` `instruments`. |
 | `models` | Optional list of Model ids from `study.yaml`; omitted means every Model. |
-| `clips` | Target Clip IDs, each `c_` plus 8 lowercase base32 characters (default `[]`; existence is checked by `push test`, story 1.5). |
-| `practice` | Practice examples (default `[]`): each `{instrument, clips, answer}`. `instrument` must be one of the Test's `instruments` (else `unknown_instrument`, field `practice.<i>.instrument`); `clips` is exactly 1 Clip ID, or 2 for a pairwise Instrument; `answer` maps Item id to the intended value and must pass the Instrument's response schema (else `config_invalid`, field `practice.<i>.clips` or `practice.<i>.answer.<item>`). Each Instrument needs at least `session.practice_clips` examples; the first ones in list order are used (count checked in story 1.5). |
+| `clips` | Target Clip IDs, each `c_` plus 8 lowercase base32 characters, unique (default `[]`; existence is checked by `push test`). |
+| `practice` | Practice examples (default `[]`): each `{instrument, clips, answer}`. `instrument` must be one of the Test's `instruments` (else `unknown_instrument`, field `practice.<i>.instrument`); `clips` is exactly 1 Clip ID, or 2 for a pairwise Instrument; `answer` maps Item id to the intended value and must pass the Instrument's response schema (else `config_invalid`, field `practice.<i>.clips` or `practice.<i>.answer.<item>`). Each Instrument needs at least `session.practice_clips` examples; the first ones in list order are used (count and Clip existence checked by `push test`, `bad_practice`). Practice clips may be shared between pilot and main Tests. |
 | `session` | Optional overrides of any `study.yaml` `session` key (`practice_clips`, `repeats`, `max_retries`, `pairing`). |
 
 Prompt variants are not chosen in the Test; they rotate by Repeat (story 1.6).

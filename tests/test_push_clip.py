@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from consortium.board.blinding import read_key
+from consortium.board.db import MIGRATIONS
 from consortium.cli import app
 from consortium.core.errors import ConsortiumError
 from consortium.core.ids import new_clip_id, session_id
@@ -173,9 +174,9 @@ def test_two_pushes_board_shape(study: Path, media: dict[str, Path]) -> None:
     conn = sqlite3.connect(study / "board.db")
     try:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        assert tables == ["clips"]
+        assert sorted(tables) == ["clips", "test_clips", "tests"]
         assert conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 2
     finally:
         conn.close()

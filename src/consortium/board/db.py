@@ -35,7 +35,34 @@ def m1_clips(conn: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [m1_clips]
+def m2_tests(conn: sqlite3.Connection) -> None:
+    """Story 1.5: registered Tests and the Clips each one uses (target or practice)."""
+    conn.execute(
+        """
+        CREATE TABLE tests (
+            name          TEXT PRIMARY KEY,
+            kind          TEXT NOT NULL CHECK (kind IN ('pilot', 'screening', 'main')),
+            path          TEXT NOT NULL,
+            sha256        TEXT NOT NULL,
+            openable      INTEGER NOT NULL CHECK (openable IN (0, 1)),
+            registered_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE test_clips (
+            test    TEXT NOT NULL REFERENCES tests(name),
+            clip_id TEXT NOT NULL REFERENCES clips(clip_id),
+            role    TEXT NOT NULL CHECK (role IN ('target', 'practice')),
+            PRIMARY KEY (test, clip_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX test_clips_by_clip ON test_clips (clip_id, role)")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [m1_clips, m2_tests]
 
 
 def _is_busy(err: BaseException) -> bool:

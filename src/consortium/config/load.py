@@ -241,13 +241,16 @@ def load_instruments(study_dir: Path | str, cfg: StudyConfig) -> dict[str, Instr
     return out
 
 
-def load_test(path: Path | str, study_dir: Path | str | None = None) -> TestConfig:
+def load_test(
+    path: Path | str, study_dir: Path | str | None = None, *, cfg: StudyConfig | None = None
+) -> TestConfig:
     """Load and validate a Test YAML file.
 
     ``study_dir`` defaults to the parent of the file's folder (``<study>/tests/x.yaml``).
     Checks that every Instrument resolves and is enabled in ``study.yaml``, and that
     every listed Model id exists. Logs ``draft_instrument: <name>`` to stderr for each
-    draft Instrument the Test lists.
+    draft Instrument the Test lists. ``cfg`` is the already loaded ``study.yaml``
+    (loaded here when omitted).
     """
     path = Path(path)
     study = Path(study_dir) if study_dir is not None else path.resolve().parent.parent
@@ -256,7 +259,8 @@ def load_test(path: Path | str, study_dir: Path | str | None = None) -> TestConf
     if test.test != path.stem:
         raise _invalid(rel, f"test: {test.test!r} must match the file name {path.stem!r}")
 
-    cfg = load_study(study)
+    if cfg is None:
+        cfg = load_study(study)
     for i, name in enumerate(test.instruments):
         if not _resolvable(study, name):
             raise ConsortiumError(
@@ -299,6 +303,19 @@ def load_test(path: Path | str, study_dir: Path | str | None = None) -> TestConf
         if instrument.draft:
             log.warning("draft_instrument: %s", name)
     return test
+
+
+def peek_test(path: Path | str) -> dict[str, Any]:
+    """The raw top-level mapping of a Test file, unvalidated; ``{}`` if it cannot be read.
+
+    For checks that must run before schema validation (``push test``: the name
+    rule and the pairing plan). ``load_test`` reports every read or YAML error.
+    """
+    try:
+        data = _safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def load_prices(study_dir: Path | str) -> PricesConfig:

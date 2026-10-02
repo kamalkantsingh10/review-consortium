@@ -13,7 +13,7 @@ from typer.core import TyperGroup
 from consortium.core.errors import ConsortiumError
 from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
-from consortium.stages.push import push_clip
+from consortium.stages.push import push_clip, push_test
 
 
 class _ConsortiumGroup(TyperGroup):
@@ -57,7 +57,7 @@ def init(
     typer.echo(str(init_study(path)))
 
 
-push_app = typer.Typer(help="Push Clips (and, from story 1.5, Tests) into the Study.")
+push_app = typer.Typer(help="Push Clips and Tests into the Study.")
 app.add_typer(push_app, name="push")
 
 StudyOption = Annotated[
@@ -78,6 +78,15 @@ def push_clip_cmd(
 ) -> None:
     """Re-encode FILE blind into clips/<clip_id>.mp4 and print the new Clip ID."""
     typer.echo(push_clip(study, file, condition or []))
+
+
+@push_app.command("test")
+def push_test_cmd(
+    file: Annotated[Path, typer.Argument(help="Test YAML file (test: <name>).")],
+    study: StudyOption = Path("."),
+) -> None:
+    """Validate FILE, register it as tests/<name>.yaml and print the Test name."""
+    typer.echo(push_test(study, file))
 
 
 personas_app = typer.Typer(help="Generate the seeded Persona Panel.")
