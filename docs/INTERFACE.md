@@ -60,6 +60,30 @@ Ingests a video file into the Study **blind**: nothing on the rating side can le
 | Another process holds the `board.db` write lock past the 5 s busy timeout | `board_busy`, exit `1`, nothing stored |
 | `board.db` was written by a newer `consortium` | `board_version_mismatch`, exit `1`, nothing stored |
 
+### `consortium personas generate [--study PATH] [--force]`
+
+Generates the Persona Panel from `study.yaml` (`seed` and `personas`) into `panel/personas/`. No network, no LLM: the cards are assembled from the approved wording file.
+
+- `--study PATH` is the Study folder (default: the current directory); `study.yaml` must load.
+- **Pool.** The 32 Big Five profiles are every high/low combination of openness (O), conscientiousness (C), extraversion (E), agreeableness (A) and neuroticism (N), ordered by bit pattern (`low` = 0, O most significant: profile 1 is all low, profile 32 all high). Each profile is crossed with every `personas.nars_bands` entry in the order listed (profile-major). Persona IDs run `p1 ... pN`, N = 32 x the number of bands (64 by default; `p1` is all-low with the first band, `p2` all-low with the second).
+- **Quotas.** Each quota attribute (`age_band`, `gender`, `cultural_region`, `robot_experience`) is assigned independently and stratified by NARS band. The N levels are laid out round-robin in listed order (so the marginal counts are equal, with any remainder going one each to the earliest-listed levels: 3 regions over 64 give 22/21/21). That sequence is cut into consecutive blocks of 32, one per band in frame order, so within each band every level appears 32 // k or 32 // k + 1 times (k levels; counts per band differ by at most 1). A band's extra units continue the cycle where the previous band's stopped: the first band's go to the earliest-listed levels, later bands' to the next levels in turn, which is what keeps the marginal counts exact. Each block is shuffled with that attribute's seed (see [Seeds](#seeds)), bands in frame order, and dealt to that band's Personas in Persona order. The shuffle is an explicit Fisher-Yates using only `random.Random(seed).getrandbits` (rejection sampling for each index), not `random.shuffle`, so the result does not depend on the Python version. Joint balance across attributes is not attempted.
+- On success, prints `<N> personas -> panel/personas` to stdout and exits `0`.
+- **Reproducible.** The same `study.yaml` gives byte-identical `panel/` trees in any folder, on any run.
+- **Atomic.** The set is built in a temporary folder `panel/.personas-new-*` and renamed into place; a failure leaves no partial Panel. Without `--force`, the final rename only succeeds onto an absent or empty `panel/personas`, so a Panel created by another process meanwhile is never overwritten (`panel_exists`). With `--force`, the old Panel is first renamed to `panel/.personas-old-*/personas`, the new one renamed in, then the old copy deleted (a failure to delete it is logged as a warning). If the second rename fails, the old Panel is renamed back; if that also fails, `personas_failed` names the folder that holds the old Panel.
+- **Crash window.** With `--force`, a crash between the two renames leaves no `panel/personas`; the old Panel is then in `panel/.personas-old-*/personas`. Move it back by hand or run `personas generate` again. Each run first removes leftover `panel/.personas-new-*` folders, and `panel/.personas-old-*` folders only while `panel/personas` exists, so a preserved old Panel is never swept.
+
+| Situation | Result |
+| --- | --- |
+| Fresh Study | `p1.md ... p64.md` and `index.json` written, `64 personas -> panel/personas`, exit `0` |
+| `panel/personas/` exists and is not empty | `panel_exists: panel/personas already exists (use --force)`, exit `1`, nothing changes |
+| `panel/personas/` exists, `--force` | The old set is replaced atomically by the regenerated set, exit `0` |
+| `personas.nars_bands` or a quota list is empty, or `study.yaml` is otherwise invalid | `config_invalid` (for example `personas.nars_bands: ...`), exit `1`, nothing written |
+| The wording file has no sentence for a band in the frame | `config_invalid: nars.<band>: no card sentence for this NARS band`, exit `1`, nothing written |
+| The wording file has no phrase for a quota level in the frame | `config_invalid: level_phrases.<attribute>.<level>: no card phrase for this quota level`, exit `1`, nothing written |
+| The file system fails while writing | `personas_failed: could not write panel/personas: <reason>`, exit `1`, no partial Panel (if restoring the old Panel under `--force` also fails, the message names where it is preserved) |
+
+Later commands read the Panel from `index.json` (never by re-deriving it); if it is absent they fail with `panel_missing`.
+
 ## Error codes
 
 | Code | Raised by | Meaning |
@@ -75,6 +99,10 @@ Ingests a video file into the Study **blind**: nothing on the rating side can le
 | `board_busy` | any command that writes `board.db` | Another process holds the `board.db` lock past the busy timeout. Try again. |
 | `board_version_mismatch` | any command that opens `board.db` | `board.db` has a newer layout version (`PRAGMA user_version`) than this `consortium` knows. |
 | `board_wal_unavailable` | any command that opens `board.db` | SQLite could not put `board.db` in WAL mode (for example on some network file systems). |
+| `panel_exists` | `personas generate` | `panel/personas/` already holds files; pass `--force` to replace them. |
+| `personas_failed` | `personas generate` | The file system failed while writing the Panel; no partial Panel is left. |
+| `panel_missing` | any command that needs Personas | `panel/personas/index.json` does not exist; run `consortium personas generate`. |
+| `panel_invalid` | any command that needs Personas | `panel/personas/index.json` cannot be read as a non-empty list of Personas (all five traits with `high`/`low`, `nars` `low`/`high`, ids exactly `p1 ... pN` in order), or a `p<n>.md` card is missing. |
 | `unknown_instrument` | any command that loads config | An Instrument name in `study.yaml` or a Test does not resolve, or a Test lists an Instrument not enabled in `study.yaml`. |
 
 ## Study folder layout
@@ -86,7 +114,8 @@ Ingests a video file into the Study **blind**: nothing on the rating side can le
   prices.yaml          Per-Model prices in USD.                                     (init; schema in story 1.2)
   tests/*.yaml         Test definitions; init writes a pilot Test, example.yaml.    (init; schema in story 1.2, registration in 1.5)
   instruments/*.yaml   Optional user Instruments.                                   (story 1.2)
-  panel/               Persona cards and the screening snapshot.                    (arrives in story 1.3)
+  panel/personas/      Persona cards (p<n>.md), index.json and meta.json.            (personas generate)
+  panel/               Screening snapshot.                                          (arrives in story 4.1)
   clips/<clip_id>.mp4  Canonicalized, metadata-free Clips.                          (push clip)
   blinding_key.csv     The only place Conditions exist.                             (push clip)
   board.db             All mutable Study state (SQLite).                            (push clip)
@@ -98,6 +127,25 @@ Ingests a video file into the Study **blind**: nothing on the rating side can le
 ```
 
 All state lives in the Study folder. Paths stored inside it are relative to it.
+
+### `panel/personas/`
+
+Written only by `personas generate`; never edited in place once used.
+
+- **`p<n>.md`** — the Persona card the Model sees. UTF-8, LF line endings, one trailing newline; no timestamps, paths, versions, Persona ID or labels. It describes behaviour only: it never contains a trait name, `high`, `low` or `NARS`. Exactly seven lines, in this order: the demographic line; the openness, conscientiousness, extraversion, agreeableness and neuroticism sentences for the Persona's poles; the NARS-band sentence. For example (`p1` of the template Study):
+
+  ```text
+  You are a man, aged 18 to 29, from the Middle East or North Africa, with regular experience of robots.
+  You prefer familiar things and practical, well-tried ways of doing them.
+  You take things as they come and do not worry much about plans or details.
+  You are quiet and reserved, and you prefer calm settings or small groups.
+  You say what you think plainly, and you trust others once they have shown they are reliable.
+  You stay calm under pressure and rarely worry for long.
+  You feel comfortable around robots and would be at ease interacting with one.
+  ```
+
+- **`index.json`** — the labels, for screening and export (the export's `persona_*` columns). Canonical JSON (sorted keys, UTF-8, no whitespace, no trailing newline): a list of Persona objects in ID order, each `{"age_band", "big_five": {"agreeableness", "conscientiousness", "extraversion", "neuroticism", "openness"}, "cultural_region", "gender", "id", "nars", "robot_experience"}`, where every `big_five` value is `"high"` or `"low"`.
+- **`meta.json`** — provenance, canonical JSON: `{"frame_sha256", "generator_version", "seed", "wording_sha256"}`. `seed` is `study.yaml` `seed`; `frame_sha256` is the SHA-256 of the canonical JSON of `study.yaml` `personas` (with defaults filled in); `wording_sha256` is the SHA-256 of the packaged `wording.yaml` bytes; `generator_version` (currently `"1"`) changes whenever the generation or card algorithm changes. It is not yet checked against the Study.
 
 ### `clips/<clip_id>.mp4`
 
@@ -169,7 +217,25 @@ All values below are what `init` writes. Fields marked *required* have no defaul
 | `personas.nars_bands` | Non-empty, unique subset of `low`, `high`; template `[low, high]`. |
 | `personas.quotas` | *Required*: `age_band`, `gender`, `cultural_region`, `robot_experience`, each a non-empty list of unique levels. |
 
-**Placeholder quota levels.** The template's quota levels are placeholders, each marked `# PLACEHOLDER — Kamal to confirm before the OLAF study`: age bands `18-29`, `30-44`, `45-59`, `60+`; genders `woman`, `man`, `non-binary`; eight broad cultural regions; robot experience `none`, `some`, `regular`. They are template defaults only, never code defaults. Confirm or replace them before the OLAF study.
+**Placeholder quota levels.** The template's quota levels are placeholders, each marked `# PLACEHOLDER — Kamal to confirm before the OLAF study`: age bands `18-29`, `30-44`, `45-59`, `60+`; genders `woman`, `man`; eight broad cultural regions; robot experience `none`, `some`, `regular`. They are template defaults only, never code defaults. Confirm or replace them before the OLAF study.
+
+### Persona card wording (built in)
+
+The card text comes from the package file `src/consortium/templates/persona_card/wording.yaml`, approved by Kamal on 2026-10-02. It is not part of the Study folder and is not user-editable without a code change; changing it changes every card.
+
+| Field | Meaning |
+| --- | --- |
+| `voice` | `second_person`. |
+| `demographic` | A one-line template using exactly the placeholders `{age_band}`, `{gender}`, `{cultural_region}`, `{robot_experience}`, each plain (no `!conversion` or `:format` spec). |
+| `traits.<trait>.{high,low}` | One sentence per pole for each of `openness`, `conscientiousness`, `extraversion`, `agreeableness`, `neuroticism`. |
+| `nars.<band>` | One sentence per NARS band; every band in `personas.nars_bands` needs one (else `config_invalid`). |
+| `level_phrases.<attribute>.<level>` | The phrase inserted for a quota level (for example `60+` -> `aged 60 or over`). Every level in the Study's `personas.quotas` needs one (else `config_invalid`); a level is never inserted verbatim. |
+
+Every sentence and phrase must be a single line (no line break of any kind, including `\u2028`, `\x85`, vertical tab and form feed), have no leading or trailing whitespace, and must not contain (case-insensitive) a trait name, `high`, `low`, `NARS`, or a trait stem: `agreeab*`, `conscientious*`, `neurotic*`, `extravert*`/`extrovert*` (and `extravers*`/`extrovers*`), `introvert*`, `open-minded` (`config_invalid`).
+
+### Seeds
+
+`study.yaml` `seed` is the only seed. Every other seed is derived as `int(sha256("<seed>:<purpose>:<key>").hexdigest()[:8], 16) & 0x7FFFFFFF` (the first 8 hex digits of the SHA-256, masked to 31 bits) and used only through Python's `random.Random(seed)`. Persona quotas use purpose `personas` with the attribute name as key (for example `1:personas:gender`).
 
 ### `tests/<name>.yaml`
 

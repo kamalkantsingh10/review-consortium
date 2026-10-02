@@ -7,6 +7,8 @@ Every failure is a ``ConsortiumError``: ``config_invalid`` with
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -19,12 +21,14 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from consortium.config.models import (
+    CardWording,
     InstrumentDef,
     PricesConfig,
     StudyConfig,
     TestConfig,
 )
 from consortium.core.errors import ConsortiumError
+from consortium.core.personas import QUOTA_ATTRIBUTES, Persona
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +36,10 @@ STUDY_FILE = "study.yaml"
 PRICES_FILE = "prices.yaml"
 USER_INSTRUMENTS_DIR = "instruments"
 _BUILTIN_PACKAGE = "consortium.instruments"
+_TEMPLATES_PACKAGE = "consortium.templates"
+CARD_WORDING_FILE = "persona_card/wording.yaml"
+PERSONAS_DIR = "panel/personas"
+PERSONAS_INDEX = f"{PERSONAS_DIR}/index.json"
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 
 # --------------------------------------------------------------------------- YAML reading
@@ -307,3 +315,88 @@ def load_prices(study_dir: Path | str) -> PricesConfig:
         if model_id not in study_ids:
             raise _invalid(PRICES_FILE, f"models.{model_id}: not a Model id in {STUDY_FILE}")
     return prices
+
+
+# --------------------------------------------------------------------------- Personas
+
+
+def load_card_wording(cfg: StudyConfig | None = None) -> CardWording:
+    """Load the approved Persona card wording from the package ``templates/``.
+
+    With ``cfg``, also checks there is a NARS sentence for every band in the frame
+    (``config_invalid``, field ``nars.<band>``) and a phrase for every quota level
+    (field ``level_phrases.<attribute>.<level>``).
+    """
+    try:
+        text = _card_wording_bytes().decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise _invalid(_CARD_WORDING_REL, f"cannot read file: {err}") from err
+    wording = _parse(text, _CARD_WORDING_REL, CardWording)
+    if cfg is not None:
+        for band in cfg.personas.nars_bands:
+            if band not in wording.nars:
+                raise _invalid(
+                    _CARD_WORDING_REL, f"nars.{band}: no card sentence for this NARS band"
+                )
+        for attr in QUOTA_ATTRIBUTES:
+            phrases = getattr(wording.level_phrases, attr)
+            for level in getattr(cfg.personas.quotas, attr):
+                if level not in phrases:
+                    raise _invalid(
+                        _CARD_WORDING_REL,
+                        f"level_phrases.{attr}.{level}: no card phrase for this quota level",
+                    )
+    return wording
+
+
+_CARD_WORDING_REL = f"<built-in>/templates/{CARD_WORDING_FILE}"
+
+
+def _card_wording_bytes() -> bytes:
+    entry = resources.files(_TEMPLATES_PACKAGE).joinpath(*CARD_WORDING_FILE.split("/"))
+    try:
+        return entry.read_bytes()
+    except OSError as err:
+        raise _invalid(_CARD_WORDING_REL, f"cannot read file: {err}") from err
+
+
+def card_wording_sha256() -> str:
+    """SHA-256 (lowercase hex) of the packaged ``wording.yaml`` bytes, for provenance."""
+    return hashlib.sha256(_card_wording_bytes()).hexdigest()
+
+
+def load_personas(study_dir: Path | str) -> list[Persona]:
+    """The generated Persona pool from ``panel/personas/index.json``, in Persona order.
+
+    Raises ``panel_missing`` when the index is absent (run ``personas generate``),
+    ``panel_invalid`` when it cannot be read as a list of Personas.
+    """
+    path = Path(study_dir) / PERSONAS_INDEX
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as err:
+        raise ConsortiumError(
+            "panel_missing",
+            f"{PERSONAS_INDEX} not found (run consortium personas generate)",
+            path=PERSONAS_INDEX,
+        ) from err
+    except OSError as err:
+        raise ConsortiumError("panel_invalid", f"cannot read: {err}", path=PERSONAS_INDEX) from err
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, list) or not data:
+            raise ValueError("must be a non-empty JSON list of Personas")
+        personas = [Persona.model_validate(item) for item in data]
+        ids = [p.id for p in personas]
+        if ids != [f"p{i}" for i in range(1, len(ids) + 1)]:
+            raise ValueError("Persona ids must be p1 ... pN, unique and in order")
+    except ValueError as err:  # includes ValidationError and UnicodeDecodeError
+        raise ConsortiumError(
+            "panel_invalid", f"{PERSONAS_INDEX}: {err}", path=PERSONAS_INDEX
+        ) from err
+    for p in personas:
+        if not (Path(study_dir) / PERSONAS_DIR / f"{p.id}.md").is_file():
+            raise ConsortiumError(
+                "panel_invalid", f"{PERSONAS_DIR}/{p.id}.md is missing", path=PERSONAS_INDEX
+            )
+    return personas

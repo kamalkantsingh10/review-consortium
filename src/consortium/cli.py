@@ -11,6 +11,7 @@ import typer
 from typer.core import TyperGroup
 
 from consortium.core.errors import ConsortiumError
+from consortium.stages import personas as personas_stage
 from consortium.stages.init import init_study
 from consortium.stages.push import push_clip
 
@@ -77,3 +78,19 @@ def push_clip_cmd(
 ) -> None:
     """Re-encode FILE blind into clips/<clip_id>.mp4 and print the new Clip ID."""
     typer.echo(push_clip(study, file, condition or []))
+
+
+personas_app = typer.Typer(help="Generate the seeded Persona Panel.")
+app.add_typer(personas_app, name="personas")
+
+
+@personas_app.command("generate")
+def personas_generate_cmd(
+    study: StudyOption = Path("."),
+    force: Annotated[
+        bool, typer.Option("--force", help="Replace an existing panel/personas.")
+    ] = False,
+) -> None:
+    """Write panel/personas/p<n>.md cards and index.json from study.yaml's seed and frame."""
+    personas = personas_stage.generate(study, force=force)
+    typer.echo(f"{len(personas)} personas -> {personas_stage.PERSONAS_DIR}")

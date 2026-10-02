@@ -7,6 +7,7 @@ Every model forbids unknown fields. Files are loaded only through
 from __future__ import annotations
 
 import re
+import string
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -23,6 +24,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from consortium.core.personas import QUOTA_ATTRIBUTES, TRAITS
 
 SCHEMA_VERSION = 1
 
@@ -380,6 +383,109 @@ def _schema_problem(schema: dict[str, Any], value: Any, field: str) -> str | Non
     if len(value) < schema.get("minLength", 0):
         return f"{where}: must not be empty"
     return None
+
+
+# --------------------------------------------------------------------------- Persona card wording
+
+# Words a card must never show: they are labels, kept only in panel/personas/index.json.
+# Whole words plus trait stems (agreeable, neurotic, introverted, open-minded, ...).
+_LABEL_PATTERNS = (
+    *TRAITS,
+    r"agreeab\w*",
+    r"conscientious\w*",
+    r"neurotic\w*",
+    r"extr[ao]ver\w*",
+    r"introver\w*",
+    r"open-minded\w*",
+    "high",
+    "low",
+    "nars",
+)
+_LABEL_WORDS = re.compile(r"\b(" + "|".join(_LABEL_PATTERNS) + r")\b", re.I)
+
+Sentence = Annotated[StrictStr, Field(min_length=1)]
+
+
+def _check_sentence(value: str) -> str:
+    if value != value.strip() or len(value.splitlines()) != 1:
+        raise ValueError("must be one line with no leading or trailing whitespace")
+    found = _LABEL_WORDS.search(value)
+    if found:
+        raise ValueError(f"must describe behaviour only; contains the label {found.group(0)!r}")
+    return value
+
+
+class TraitWording(_Strict):
+    high: Sentence
+    low: Sentence
+
+    @field_validator("high", "low")
+    @classmethod
+    def _sentence(cls, value: str) -> str:
+        return _check_sentence(value)
+
+
+class TraitsWording(_Strict):
+    openness: TraitWording
+    conscientiousness: TraitWording
+    extraversion: TraitWording
+    agreeableness: TraitWording
+    neuroticism: TraitWording
+
+
+class LevelPhrases(_Strict):
+    """Phrase inserted for each quota level; every level in the frame needs one."""
+
+    age_band: dict[StrictStr, Sentence] = Field(default_factory=dict)
+    gender: dict[StrictStr, Sentence] = Field(default_factory=dict)
+    cultural_region: dict[StrictStr, Sentence] = Field(default_factory=dict)
+    robot_experience: dict[StrictStr, Sentence] = Field(default_factory=dict)
+
+    @field_validator("age_band", "gender", "cultural_region", "robot_experience")
+    @classmethod
+    def _phrases(cls, value: dict[str, str]) -> dict[str, str]:
+        for phrase in value.values():
+            _check_sentence(phrase)
+        return value
+
+
+class CardWording(_Strict):
+    """The approved Persona card wording (package ``templates/persona_card/wording.yaml``)."""
+
+    voice: Literal["second_person"]
+    demographic: Sentence
+    traits: TraitsWording
+    nars: dict[Literal["low", "high"], Sentence]
+    level_phrases: LevelPhrases = Field(default_factory=LevelPhrases)
+
+    @field_validator("demographic")
+    @classmethod
+    def _demographic_template(cls, value: str) -> str:
+        _check_sentence(value)
+        try:
+            parsed = [p for p in string.Formatter().parse(value) if p[1] is not None]
+        except ValueError as err:
+            raise ValueError(f"not a valid line template: {err}") from err
+        for _, field, spec, conversion in parsed:
+            if spec or conversion:
+                raise ValueError(
+                    f"placeholder {{{field}}} may not have a conversion or format spec"
+                )
+        fields = [p[1] for p in parsed]
+        unknown = sorted(set(fields) - set(QUOTA_ATTRIBUTES))
+        if unknown:
+            raise ValueError(f"unknown placeholder(s) {', '.join(unknown)}")
+        missing = [a for a in QUOTA_ATTRIBUTES if a not in fields]
+        if missing:
+            raise ValueError(f"missing placeholder(s) {', '.join(missing)}")
+        return value
+
+    @field_validator("nars")
+    @classmethod
+    def _nars_sentences(cls, value: dict[str, str]) -> dict[str, str]:
+        for sentence in value.values():
+            _check_sentence(sentence)
+        return value
 
 
 # --------------------------------------------------------------------------- prices.yaml

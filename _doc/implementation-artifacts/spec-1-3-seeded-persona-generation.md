@@ -2,7 +2,8 @@
 title: 'Story 1.3 — Seeded Persona generation'
 type: 'feature'
 created: '2026-10-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'd560c86656a66673593fe6fa991357cf4abe9bcd'
 route: 'dispatch'
 review_loop_iteration: 0
 context:
@@ -58,15 +59,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/consortium/core/seeds.py` -- `derive_seed` -- the single seed rule, AD-10.
-- [ ] `src/consortium/templates/persona_card/wording.yaml` -- the approved wording, copied verbatim from the approved draft -- research content stays out of code.
-- [ ] `src/consortium/config/models.py` -- `CardWording` -- typed wording.
-- [ ] `src/consortium/core/personas.py` -- `Persona`, `generate_personas`, `render_card(persona, wording)` -- pure.
-- [ ] `src/consortium/stages/personas.py` -- `generate(study_dir, force)` -- load config, refuse `panel_exists`, write atomically.
-- [ ] `src/consortium/config/load.py` -- `load_personas(study_dir)` (`panel_missing` if absent) and `load_card_wording()` -- for 1.6 and 1.12.
-- [ ] `src/consortium/cli.py` -- the `personas generate [--study PATH] [--force]` subcommand group -- a thin adapter.
-- [ ] `docs/INTERFACE.md` -- the command, the `panel/` files, the card layout (behaviour only; labels in `index.json`), the wording file, and the seed rule.
-- [ ] `tests/test_personas.py` -- every matrix row; a fixed `derive_seed` vector; 32 profiles × each band; marginal counts; golden `p1.md` for the template seed; no card contains a trait name, `high`, `low`, `NARS` or its Persona ID.
+- [x] `src/consortium/core/seeds.py` -- `derive_seed` -- the single seed rule, AD-10.
+- [x] `src/consortium/templates/persona_card/wording.yaml` -- the approved wording, copied verbatim from the approved draft -- research content stays out of code.
+- [x] `src/consortium/config/models.py` -- `CardWording` -- typed wording.
+- [x] `src/consortium/core/personas.py` -- `Persona`, `generate_personas`, `render_card(persona, wording)` -- pure.
+- [x] `src/consortium/stages/personas.py` -- `generate(study_dir, force)` -- load config, refuse `panel_exists`, write atomically.
+- [x] `src/consortium/config/load.py` -- `load_personas(study_dir)` (`panel_missing` if absent) and `load_card_wording()` -- for 1.6 and 1.12.
+- [x] `src/consortium/cli.py` -- the `personas generate [--study PATH] [--force]` subcommand group -- a thin adapter.
+- [x] `docs/INTERFACE.md` -- the command, the `panel/` files, the card layout (behaviour only; labels in `index.json`), the wording file, and the seed rule.
+- [x] `tests/test_personas.py` -- every matrix row; a fixed `derive_seed` vector; 32 profiles × each band; marginal counts; golden `p1.md` for the template seed; no card contains a trait name, `high`, `low`, `NARS` or its Persona ID.
 
 **Acceptance Criteria:**
 - Given the template Study, when generation runs twice into separate folders, then a recursive byte comparison of the two `panel/` dirs is equal.
@@ -74,9 +75,31 @@ context:
 
 ## Implementation Notes
 
+- `core.personas` takes the config objects structurally (Protocols), so core never imports `config`; `config.models` imports `TRAITS`/`QUOTA_ATTRIBUTES` from core.
+- `load_card_wording(cfg=None)`: with `cfg`, checks a NARS sentence exists for every frame band (`config_invalid`, field `nars.<band>`). `CardWording` also refuses sentences containing a trait name, `high`, `low` or `NARS`, multi-line sentences, and demographic templates with unknown or missing placeholders.
+- New error codes: `personas_failed` (file system failure while writing), `panel_invalid` (unreadable `index.json`). `index.json` has no trailing newline.
+- `--force` swap: old dir renamed aside, new dir renamed in, old removed; restored if the second rename fails.
+
 ## Spec Change Log
 
 ## Review Triage Log
+
+| # | Source | Finding | Verdict | Route |
+|---|---|---|---|---|
+| 1 | BH, EC, VG | Verbatim quota levels and unchecked level phrases can put label words on a card | high | patch (require a phrase for every level; check phrases) |
+| 2 | BH | Trait-word stems (agreeable, neurotic, extravert…) pass the label check | medium | patch |
+| 3 | EC | Unicode line separators pass the one-line check | low | patch (direct) |
+| 4 | EC | Conversion or format specs in the demographic template | low | patch (direct) |
+| 5 | BH | random.shuffle not stable across Python versions, so byte-identical Panels aren't guaranteed | medium | patch (explicit Fisher–Yates + golden hash) |
+| 6 | BH | Marginal-only quotas can confound demographics with the NARS band | medium | patch (stratified by NARS band) |
+| 7 | BH | index.json has no provenance (seed, frame, wording) | medium | patch (meta.json) |
+| 8 | BH, EC, VG | --force rollback failure silent; stale dirs never swept; non-force race; restore path untested | medium | patch |
+| 9 | BH, EC, VG | load_personas accepts partial big_five, bad nars, bad or duplicate IDs, empty list | medium | patch |
+| 10 | VG | Validator rules (missing placeholder, NARS labels, multi-line) untested | medium | patch (tests) |
+| 11 | BH | Canonical-JSON test uses ensure_ascii=True | low | patch (direct) |
+| 12 | BH | Screening-snapshot row dropped from the layout docs | low | patch (doc) |
+| 13 | BH | Regenerating a Panel already used by Runs re-labels past responses | medium | defer (no Runs exist until 1.7) |
+| 14 | BH | Gender change has no recorded rationale | false | Recorded in the Code Map note and the approved wording file (Kamal, 2026-10-02) |
 
 ## Design Notes
 
