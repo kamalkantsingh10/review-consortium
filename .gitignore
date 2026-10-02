@@ -8,3 +8,7 @@ build/
 .coverage
 htmlcov/
 .mypy_cache/
+
+# Claude Code agents and skills (local tooling)
+.claude/agents/
+.claude/skills/
