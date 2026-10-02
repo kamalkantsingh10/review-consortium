@@ -1,0 +1,19 @@
+# DRAFT — replace with a published presence scale before any main Test
+# This single 7-point item is a placeholder until a published presence scale is
+# chosen. Because draft is true it is refused for kind: main Tests (gate in Epic 4);
+# pilot and screening Tests that list it log "draft_instrument: presence".
+schema_version: 1
+name: presence
+version: "0-draft"
+draft: true
+instructions: >-
+  Please rate how present the robot in the video clip felt to you.
+prompt_variants:
+  default: >-
+    Watch the video clip, then answer with one whole number from 1 to 7.
+items:
+  - id: presence_1
+    type: likert
+    text: "How much did the robot feel as if it were really there with you?"
+    points: 7
+    anchors: {low: Not at all, high: Completely}

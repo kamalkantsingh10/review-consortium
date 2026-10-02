@@ -318,6 +318,14 @@ So that the whole pipeline works end to end with no API cost.
 **Then** `attempt` is incremented before dispatch, the rendered request is appended to `archive/requests.jsonl` before the attempt is marked `sent`, and the response is appended to `archive/responses.jsonl` before any state change (AD-4, AD-5)
 **And** Archive records are keyed by `(trial_id, attempt)` and reference media by `clip_id` and SHA-256 only
 
+### Story 1.8: Resume a Run and verify re-issue
+
+As Kamal,
+I want a killed or interrupted Run to resume exactly where it stopped, and proof that every archived request can be re-issued byte-identically,
+So that crashes never cost data or money, and the Archive is a trustworthy record.
+
+**Acceptance Criteria:**
+
 **Given** a Run killed mid-way
 **When** I run `open <test> --resume`
 **Then** completed Trials are not re-sent, and `planned` or orphaned `sent` Trials are dispatched with a new attempt (FR18, NFR6)
@@ -326,7 +334,7 @@ So that the whole pipeline works end to end with no API cost.
 **When** I re-render every request from the Study folder
 **Then** each is byte-identical to its archived request (FR24)
 
-### Story 1.8: Cost estimate, ceiling, pause and resume
+### Story 1.9: Cost estimate, ceiling, pause and resume
 
 As Kamal,
 I want to see the cost before a Run and never exceed my ceiling,
@@ -353,7 +361,7 @@ So that I control spend on a researcher's budget.
 **When** I run `open <test> --resume --ceiling <higher>`
 **Then** it continues at Trial level
 
-### Story 1.9: Response validation, retries and invalid answers
+### Story 1.10: Response validation, retries and invalid answers
 
 As Kamal,
 I want malformed answers retried and then marked invalid,
@@ -378,7 +386,7 @@ So that bad output never silently enters my data.
 **When** a Run completes
 **Then** the invalid-answer rate per Agent and per Model is computed and available to `status` and `export`
 
-### Story 1.10: Status
+### Story 1.11: Status
 
 As Kamal,
 I want `consortium status [<test>]` to show progress while a Run is going,
@@ -395,7 +403,7 @@ So that I can see what's done, failing and costing.
 **When** I compare status counts with the Archive
 **Then** they match
 
-### Story 1.11: Export with blinding join
+### Story 1.12: Export with blinding join
 
 As Kamal,
 I want `consortium export <test>` to produce one tidy, versioned CSV with Conditions rejoined only at that moment,

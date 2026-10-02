@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "PracticeExample": {
+      "additionalProperties": false,
+      "description": "A Practice clip (or pair) with the intended answer shown to the Model.",
+      "properties": {
+        "answer": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Answer",
+          "type": "object"
+        },
+        "clips": {
+          "items": {
+            "pattern": "^c_[a-z2-7]{8}$",
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Clips",
+          "type": "array"
+        },
+        "instrument": {
+          "pattern": "^[a-z0-9][a-z0-9_]*$",
+          "title": "Instrument",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instrument",
+        "clips",
+        "answer"
+      ],
+      "title": "PracticeExample",
+      "type": "object"
+    },
+    "SessionOverrides": {
+      "additionalProperties": false,
+      "description": "Per-Test overrides of ``study.yaml`` ``session``; unset keys inherit.",
+      "properties": {
+        "max_retries": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Retries"
+        },
+        "pairing": {
+          "anyOf": [
+            {
+              "const": "all_pairs",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pairing"
+        },
+        "practice_clips": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Practice Clips"
+        },
+        "repeats": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repeats"
+        }
+      },
+      "title": "SessionOverrides",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "clips": {
+      "items": {
+        "pattern": "^c_[a-z2-7]{8}$",
+        "type": "string"
+      },
+      "title": "Clips",
+      "type": "array"
+    },
+    "instruments": {
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9_]*$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Instruments",
+      "type": "array"
+    },
+    "kind": {
+      "enum": [
+        "pilot",
+        "screening",
+        "main"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "models": {
+      "anyOf": [
+        {
+          "items": {
+            "pattern": "^m[1-9][0-9]*$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Models"
+    },
+    "practice": {
+      "items": {
+        "$ref": "#/$defs/PracticeExample"
+      },
+      "title": "Practice",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Config file schema version.",
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session": {
+      "$ref": "#/$defs/SessionOverrides"
+    },
+    "test": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+      "title": "Test",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "test",
+    "kind",
+    "instruments"
+  ],
+  "title": "TestConfig",
+  "type": "object",
+  "x-schema-version": 1
+}

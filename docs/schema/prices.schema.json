@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "ModelPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "input_usd_per_mtok": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "title": "Input Usd Per Mtok",
+          "type": "string"
+        },
+        "output_usd_per_mtok": {
+          "pattern": "^[0-9]+(\\.[0-9]+)?$",
+          "title": "Output Usd Per Mtok",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_usd_per_mtok",
+        "output_usd_per_mtok"
+      ],
+      "title": "ModelPrice",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "models": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^m[1-9][0-9]*$": {
+          "$ref": "#/$defs/ModelPrice"
+        }
+      },
+      "title": "Models",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Config file schema version.",
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "models"
+  ],
+  "title": "PricesConfig",
+  "type": "object",
+  "x-schema-version": 1
+}

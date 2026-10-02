@@ -1,5 +1,7 @@
-# Per-Model prices in USD (decimal strings). The fake Model is free.
+# Per-Model prices in USD per million tokens, as decimal strings (schema_version 1).
+# JSON Schema: docs/schema/prices.schema.json. The fake Model is free.
+schema_version: 1
 models:
   m1:
-    provider: fake
-    price: "0"
+    input_usd_per_mtok: "0"
+    output_usd_per_mtok: "0"

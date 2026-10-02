@@ -1,0 +1,16 @@
+# Built-in Instrument: pairwise comparison of two Clips.
+schema_version: 1
+name: pairwise_alive
+version: "1"
+draft: false
+instructions: >-
+  You will see two video clips of a robot, labelled A and B. Compare them and
+  choose one.
+prompt_variants:
+  default: >-
+    Watch both video clips, then answer the question with A or B.
+items:
+  - id: alive
+    type: pairwise
+    text: "Which one feels more alive?"
+    options: [A, B]

@@ -1,3 +1,11 @@
-# A pilot Test stub. The Test schema arrives in story 1.5.
+# A pilot Test (schema_version 1). Field reference: docs/INTERFACE.md;
+# JSON Schema: docs/schema/test.schema.json.
+schema_version: 1
 test: example
-kind: pilot
+kind: pilot                 # pilot | screening | main
+instruments: [godspeed]
+# models: [m1]              # optional; omitted means every Model in study.yaml
+clips: []                   # target Clip IDs (c_...), added after `consortium push clip`
+practice: []                # Practice examples: {instrument, clips: [c_...], answer: {item_id: value}}
+# session:                  # optional overrides of study.yaml session
+#   repeats: 1

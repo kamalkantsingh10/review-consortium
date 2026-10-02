@@ -1,0 +1,154 @@
+{
+  "$defs": {
+    "Anchors": {
+      "additionalProperties": false,
+      "properties": {
+        "high": {
+          "minLength": 1,
+          "title": "High",
+          "type": "string"
+        },
+        "low": {
+          "minLength": 1,
+          "title": "Low",
+          "type": "string"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "title": "Anchors",
+      "type": "object"
+    },
+    "ItemDef": {
+      "additionalProperties": false,
+      "properties": {
+        "anchors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Anchors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Options"
+        },
+        "points": {
+          "anyOf": [
+            {
+              "maximum": 11,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Points"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "likert",
+            "pairwise",
+            "free_text"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "text"
+      ],
+      "title": "ItemDef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "draft": {
+      "default": false,
+      "description": "A draft Instrument may not be used in kind: main Tests.",
+      "title": "Draft",
+      "type": "boolean"
+    },
+    "instructions": {
+      "minLength": 1,
+      "title": "Instructions",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ItemDef"
+      },
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "name": {
+      "pattern": "^[a-z0-9][a-z0-9_]*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "prompt_variants": {
+      "additionalProperties": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Prompt Variants",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Config file schema version.",
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "version": {
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "version",
+    "instructions",
+    "prompt_variants",
+    "items"
+  ],
+  "title": "InstrumentDef",
+  "type": "object",
+  "x-schema-version": 1
+}

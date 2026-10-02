@@ -1,5 +1,68 @@
-# Study configuration. The full schema arrives in story 1.2.
+# Study configuration (schema_version 1). Field reference: docs/INTERFACE.md;
+# JSON Schema: docs/schema/study.schema.json. Every default is written out here.
+schema_version: 1
+
+# The one Study seed; every other seed is derived from it.
 seed: 1
+
+# Instruments available to Tests: built-in names, or user Instruments in instruments/<name>.yaml.
+instruments: [godspeed, pairwise_alive, presence]
+
+# Models are keyed by id (m1, m2, ...), never by list position. Pin exact versions.
 models:
   - id: m1
-    provider: fake
+    provider: fake          # fake | gemini | qwen
+    model: fake-1           # pinned version; empty or "...latest" is rejected
+    settings:
+      temperature: 0.7      # > 0
+    max_output_tokens: 512
+    limits:                 # what this Model accepts per request
+      max_seconds: 600
+      max_bytes: 20000000
+      inline_base64: true   # media sent inline as base64 (counts 4/3 of the file size)
+
+# Canonical media profile every Clip is re-encoded to at ingest.
+media:
+  height: 480
+  video_kbps: 400
+  audio_kbps: 64
+  fps: 25
+
+session:
+  practice_clips: 2         # Practice examples per Trial per Instrument
+  repeats: 3
+  max_retries: 2
+  pairing: all_pairs
+
+# Max in-flight calls per provider.
+concurrency: 4
+
+# Required; there are no code defaults.
+thresholds:
+  persona_fidelity_min: 0.8
+  invalid_rate_max: 0.05
+  leak_tolerance:           # resolution and fps must match exactly
+    duration_s: 1.0
+    loudness_lufs: 2.0
+
+# Persona frame: 32 Big Five profiles x NARS bands, quota-balanced on four attributes.
+personas:
+  big_five: all_32
+  nars_bands: [low, high]
+  quotas:
+    # PLACEHOLDER — Kamal to confirm before the OLAF study
+    age_band: ["18-29", "30-44", "45-59", "60+"]
+    # PLACEHOLDER — Kamal to confirm before the OLAF study
+    gender: [woman, man, non-binary]
+    # PLACEHOLDER — Kamal to confirm before the OLAF study
+    cultural_region:
+      - western_europe
+      - eastern_europe
+      - north_america
+      - latin_america
+      - east_asia
+      - south_asia
+      - middle_east_north_africa
+      - sub_saharan_africa
+    # PLACEHOLDER — Kamal to confirm before the OLAF study
+    robot_experience: [none, some, regular]

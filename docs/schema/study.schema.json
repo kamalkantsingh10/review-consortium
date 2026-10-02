@@ -1,0 +1,335 @@
+{
+  "$defs": {
+    "LeakTolerance": {
+      "additionalProperties": false,
+      "description": "Allowed per-Condition differences; resolution and fps must match exactly.",
+      "properties": {
+        "duration_s": {
+          "minimum": 0,
+          "title": "Duration S",
+          "type": "number"
+        },
+        "loudness_lufs": {
+          "minimum": 0,
+          "title": "Loudness Lufs",
+          "type": "number"
+        }
+      },
+      "required": [
+        "duration_s",
+        "loudness_lufs"
+      ],
+      "title": "LeakTolerance",
+      "type": "object"
+    },
+    "MediaLimits": {
+      "additionalProperties": false,
+      "description": "What a Model accepts per request; ``push test`` checks every Trial against it.",
+      "properties": {
+        "inline_base64": {
+          "default": true,
+          "title": "Inline Base64",
+          "type": "boolean"
+        },
+        "max_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "max_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Max Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "max_seconds",
+        "max_bytes"
+      ],
+      "title": "MediaLimits",
+      "type": "object"
+    },
+    "MediaProfile": {
+      "additionalProperties": false,
+      "description": "The one canonical encoding every Clip is re-encoded to at ingest.",
+      "properties": {
+        "audio_kbps": {
+          "default": 64,
+          "exclusiveMinimum": 0,
+          "title": "Audio Kbps",
+          "type": "integer"
+        },
+        "fps": {
+          "default": 25,
+          "exclusiveMinimum": 0,
+          "title": "Fps",
+          "type": "integer"
+        },
+        "height": {
+          "default": 480,
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "video_kbps": {
+          "default": 400,
+          "exclusiveMinimum": 0,
+          "title": "Video Kbps",
+          "type": "integer"
+        }
+      },
+      "title": "MediaProfile",
+      "type": "object"
+    },
+    "ModelConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^m[1-9][0-9]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/MediaLimits"
+        },
+        "max_output_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "fake",
+            "gemini",
+            "qwen"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/ModelSettings"
+        }
+      },
+      "required": [
+        "id",
+        "provider",
+        "model",
+        "max_output_tokens",
+        "limits"
+      ],
+      "title": "ModelConfig",
+      "type": "object"
+    },
+    "ModelSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {
+          "default": 0.7,
+          "exclusiveMinimum": 0,
+          "title": "Temperature",
+          "type": "number"
+        }
+      },
+      "title": "ModelSettings",
+      "type": "object"
+    },
+    "PersonaFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "big_five": {
+          "const": "all_32",
+          "default": "all_32",
+          "title": "Big Five",
+          "type": "string"
+        },
+        "nars_bands": {
+          "items": {
+            "enum": [
+              "low",
+              "high"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Nars Bands",
+          "type": "array"
+        },
+        "quotas": {
+          "$ref": "#/$defs/Quotas"
+        }
+      },
+      "required": [
+        "quotas"
+      ],
+      "title": "PersonaFrame",
+      "type": "object"
+    },
+    "Quotas": {
+      "additionalProperties": false,
+      "properties": {
+        "age_band": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Age Band",
+          "type": "array"
+        },
+        "cultural_region": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Cultural Region",
+          "type": "array"
+        },
+        "gender": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Gender",
+          "type": "array"
+        },
+        "robot_experience": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Robot Experience",
+          "type": "array"
+        }
+      },
+      "required": [
+        "age_band",
+        "gender",
+        "cultural_region",
+        "robot_experience"
+      ],
+      "title": "Quotas",
+      "type": "object"
+    },
+    "SessionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        },
+        "pairing": {
+          "const": "all_pairs",
+          "default": "all_pairs",
+          "title": "Pairing",
+          "type": "string"
+        },
+        "practice_clips": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Practice Clips",
+          "type": "integer"
+        },
+        "repeats": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Repeats",
+          "type": "integer"
+        }
+      },
+      "title": "SessionConfig",
+      "type": "object"
+    },
+    "Thresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "invalid_rate_max": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Invalid Rate Max",
+          "type": "number"
+        },
+        "leak_tolerance": {
+          "$ref": "#/$defs/LeakTolerance"
+        },
+        "persona_fidelity_min": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Persona Fidelity Min",
+          "type": "number"
+        }
+      },
+      "required": [
+        "persona_fidelity_min",
+        "invalid_rate_max",
+        "leak_tolerance"
+      ],
+      "title": "Thresholds",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "concurrency": {
+      "default": 4,
+      "minimum": 1,
+      "title": "Concurrency",
+      "type": "integer"
+    },
+    "instruments": {
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9_]*$",
+        "type": "string"
+      },
+      "title": "Instruments",
+      "type": "array"
+    },
+    "media": {
+      "$ref": "#/$defs/MediaProfile"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/$defs/ModelConfig"
+      },
+      "minItems": 1,
+      "title": "Models",
+      "type": "array"
+    },
+    "personas": {
+      "$ref": "#/$defs/PersonaFrame"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Config file schema version.",
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "seed": {
+      "exclusiveMaximum": 9223372036854775808,
+      "minimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "session": {
+      "$ref": "#/$defs/SessionConfig"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/Thresholds"
+    }
+  },
+  "required": [
+    "schema_version",
+    "seed",
+    "instruments",
+    "models",
+    "thresholds",
+    "personas"
+  ],
+  "title": "StudyConfig",
+  "type": "object",
+  "x-schema-version": 1
+}

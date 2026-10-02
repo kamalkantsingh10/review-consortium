@@ -1,0 +1,25 @@
+# Built-in Instrument: Godspeed questionnaire, animacy and likeability scales
+# (Bartneck, Kulic, Croft & Zoghbi, 2009). 5-point semantic differential items.
+schema_version: 1
+name: godspeed
+version: "1"
+draft: false
+instructions: >-
+  Please rate your impression of the robot in the video clip on each of the
+  following scales. Each scale runs from 1 to 5 between two opposite words.
+prompt_variants:
+  default: >-
+    Watch the video clip, then rate the robot on every scale. Answer with one
+    whole number from 1 to 5 for each item.
+items:
+  - {id: animacy_1, type: likert, text: "Dead / Alive", points: 5, anchors: {low: Dead, high: Alive}}
+  - {id: animacy_2, type: likert, text: "Stagnant / Lively", points: 5, anchors: {low: Stagnant, high: Lively}}
+  - {id: animacy_3, type: likert, text: "Mechanical / Organic", points: 5, anchors: {low: Mechanical, high: Organic}}
+  - {id: animacy_4, type: likert, text: "Artificial / Lifelike", points: 5, anchors: {low: Artificial, high: Lifelike}}
+  - {id: animacy_5, type: likert, text: "Inert / Interactive", points: 5, anchors: {low: Inert, high: Interactive}}
+  - {id: animacy_6, type: likert, text: "Apathetic / Responsive", points: 5, anchors: {low: Apathetic, high: Responsive}}
+  - {id: likeability_1, type: likert, text: "Dislike / Like", points: 5, anchors: {low: Dislike, high: Like}}
+  - {id: likeability_2, type: likert, text: "Unfriendly / Friendly", points: 5, anchors: {low: Unfriendly, high: Friendly}}
+  - {id: likeability_3, type: likert, text: "Unkind / Kind", points: 5, anchors: {low: Unkind, high: Kind}}
+  - {id: likeability_4, type: likert, text: "Unpleasant / Pleasant", points: 5, anchors: {low: Unpleasant, high: Pleasant}}
+  - {id: likeability_5, type: likert, text: "Awful / Nice", points: 5, anchors: {low: Awful, high: Nice}}
